@@ -1,0 +1,14 @@
+{
+  "name": "article_uploader",
+  "version": "1.0.0",
+  "description": "Arweave upload orchestrator for article review outputs with GraphQL tagging",
+  "type": "module",
+  "main": "upload_cli.js",
+  "scripts": {
+    "upload": "node upload_cli.js"
+  },
+  "dependencies": {
+    "@ardrive/turbo-sdk": "file:../../Arweave-Cli/node_modules/@ardrive/turbo-sdk",
+    "dotenv": "file:../../Arweave-Cli/node_modules/dotenv"
+  }
+}

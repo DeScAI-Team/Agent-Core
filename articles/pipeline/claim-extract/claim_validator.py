@@ -37,7 +37,7 @@ MODEL                 = os.environ.get("VALIDATOR_MODEL",           "mixtral-8x7
 CONCURRENCY           = int(os.environ.get("VALIDATOR_CONCURRENCY", "15"))
 
 MAX_RETRIES           = 3
-KEY_SECTION_MAX_CHARS = int(os.environ.get("VALIDATOR_KEY_SECTION_MAX_CHARS", "24000"))
+KEY_SECTION_MAX_CHARS = int(os.environ.get("VALIDATOR_KEY_SECTION_MAX_CHARS", "6000"))
 
 _data_base = os.environ.get("CLAIM_EXTRACT_DATA_DIR") or os.path.dirname(__file__)
 INPUT_CLAIMS = os.path.join(_data_base, "final_claims_for_audit.jsonl")
@@ -57,15 +57,12 @@ METHOD_SECTION_HINTS = ["method", "materials", "approach", "experiment", "protoc
 RESULT_SECTION_HINTS = ["result", "finding", "analysis", "observation"]
 CONCLUSION_SECTION_HINTS = ["conclusion", "summary", "implication", ]
 
-CHUNK_WINDOW       = 2  # how many neighbors on each side of the source chunk
+CHUNK_WINDOW       = 1  # how many neighbors on each side of the source chunk
 
 CLAIM_TYPE_SECTION_MAP = {
-    "Fact":      ["method", "result", "data", "statistical", "pilot",
-                  "pre-processing", "target", "computational", "binding", "sample"],
-    "Assertion": ["result", "discussion", "conclusion", "interpreting",
-                  "pilot", "background", "hypothes"],
-    "Roadmap":   ["method", "timeline", "computational", "yeast", "binding",
-                  "dissemination", "contingent", "sample", "data collection"],
+    "Fact":      ["result", "finding", "data", "efficacy"],
+    "Assertion": ["result", "discussion", "conclusion"],
+    "Roadmap":   ["discussion", "conclusion"],
 }
 
 VALID_VERDICTS = {"supported", "unsupported", "insufficient_info"}
@@ -266,8 +263,7 @@ def build_claim_context(record: dict, chunk_index: dict) -> str:
         if any(hint in heading for hint in section_hints):
             layer_b_parts.append(_fmt_chunk(doc_chunks[cid]))
 
-    # Budget: 40% for layer A, 60% for layer B
-    budget_a = int(KEY_SECTION_MAX_CHARS * 0.4)
+    budget_a = int(KEY_SECTION_MAX_CHARS * 0.5)
     budget_b = KEY_SECTION_MAX_CHARS - budget_a
 
     def truncate_parts(parts: list, budget: int) -> str:

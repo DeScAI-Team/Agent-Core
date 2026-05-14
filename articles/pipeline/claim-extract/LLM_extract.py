@@ -21,16 +21,39 @@ def extract_hybrid_claims(record):
     <Scientific_claim> tokens act as hints; the model also surfaces hidden claims
     embedded in surrounding context.
     """
-    prompt = f"""You are a scientific claim extractor working on research paper chunks.
+    prompt = f"""You are a scientific claim extractor for research paper quality review.
 
-Your job:
-1. The text below may contain <Scientific_claim>...</Scientific_claim> tags, treat these as strong hints for explicit claims.
-2. Also identify any additional claims hidden in the surrounding context that the tags missed.
-3. Every extracted claim must be DECONTEXTUALIZED, fully self-contained without needing the surrounding text.
-4. Classify each claim as one of: Fact, Assertion, or Roadmap.
-   - Fact: an established or measured finding
-   - Assertion: an argued or proposed interpretation
-   - Roadmap: a stated goal, gap, or future direction
+Your job is to extract SUBSTANTIVE scientific claims — statements that carry
+scientific weight and would matter when evaluating the paper's quality,
+validity, or contribution. The text may contain <Scientific_claim>...</Scientific_claim>
+tags as hints, but use your judgment: only extract a tagged span if it meets
+the significance criteria below.
+
+EXTRACT these kinds of claims:
+- Novel experimental findings and measured results (with data, p-values, effect sizes)
+- Interpretive or mechanistic assertions the authors make about their data
+- Comparisons between treatments, conditions, or prior work
+- Causal or correlational claims linking variables
+- Conclusions about what the data means for the field
+- Knowledge gaps, hypotheses, or future directions that frame the study's contribution
+- Quality or validity statements about the study's own data (e.g. reproducibility claims)
+
+DO NOT EXTRACT:
+- Routine protocol steps (reagents used, temperatures, incubation times, plate layouts)
+- Tool or software names without a substantive claim about them
+- Standard operating parameters (wash buffers, centrifuge speeds, staining protocols)
+- Figure/table legends that merely describe what a visualization shows
+- Definitions of common scientific terms or well-known biological facts
+  that provide background but are not contested or study-specific
+- Administrative details (ethics approvals, sample storage, equipment model numbers)
+
+Classify each claim as:
+  Fact — a specific measured result, quantitative finding, or empirically observed outcome
+  Assertion — an interpretation, inference, or argued conclusion drawn from data
+  Roadmap — a stated gap, hypothesis, limitation, or future direction
+
+Every claim must be DECONTEXTUALIZED: fully self-contained and understandable
+without the surrounding text.
 
 Respond ONLY with one JSON object per line (JSONL). No markdown, no explanation.
 Fields: "claim_type", "claim"
@@ -101,6 +124,5 @@ with open(input_path, "r") as infile, open(output_path, "w") as outfile:
                 continue
 
         print(f"  → {written} claims extracted")
-        time.sleep(4)
 
 print(f"\nDone. Final claims written to: {output_path}")

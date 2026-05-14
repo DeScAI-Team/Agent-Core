@@ -1,59 +1,50 @@
 # Secrets and local config
 .env
 
-# Arweave-Cli: Node install only (.env covered by root `.env`)
-Arweave-Cli/node_modules/
+# venv
+agent/ 
 
-# Local documents
-document (8).pdf
-
-# Local / generated data (do not commit)
-articles/data/
-compounds/data/
-test-data/
-reviews/
-data/
-
-# One-off scripts and design notes (local only)
-/merge_kb.py
-/articles/TRIAGE_NOISE_FILTERING_2026_05_01.md
-/articles/review_example.txt
-/articles/CHANGES_self_reported_grading.md
-
-# Arweave key material
-Arweave-Cli/arweave-keyfile-*.json
-
-# Embedded / copied Python environments
-agent/
-
-# Caches
-.cache/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-**/openalex_cache.json
-
-# Python
+# cache
+.cursor/ 
 __pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.eggs/
+articles/pipeline/__pycache__
+articles/pipeline/claim-extract/__pycache__
+articles/pipeline/empirical/__pycache__
+articles/pipeline/Protocol-pre_results/__pycache__
+articles/pipeline/Theoretical-narrative/__pycache__
+compounds/__pycache__
+compounds/pipeline/single/__pycache__
+proposals/pipeline/__pycache__
+articles/article_uploader/__pycache__
 
-# Virtual environments
-.venv/
-venv/
-env/
-# Root folder named `test` is a local venv in this repo (pyvenv.cfg)
-/test/
+# data
+articles/data/*
+compounds/data/*
+proposals/data/*
+reviews/ 
+test-data/ 
 
-# OS / editor noise
-.DS_Store
-Thumbs.db
-*.log
+# internal docs
+articles/CHANGES_self_reported_grading.md
+articles/review_example.txt
+articles/TRIAGE_NOISE_FILTERING_2026_05_01.md
+compounds/test_trio.ps1
+debug-c060aa.log 
+debug-dca913.log 
 
-# JSON artifacts (allow small pipeline config under articles/pipeline)
-**/*.json
-!articles/pipeline/**/*.json
-!**/package.json
-!**/package-lock.json
+# random stuff
+merge_kb.py
+report.json 
+RUN_FULL_PIPELINE.md
+run_pipe2.py
+
+# arweave stuff
+Arweave-Cli/node_modules/
+Arweave-Cli/.env
+Arweave-Cli/aweave-keyfile-va7LFY_zmPWTFVCgJpgadZ-AS3wAZ4pmQSeF3LYnG7w.json
+Arweave-Cli/upload_reciept.json
+articles/article_uploader/node_modules/
+articles/article_uploader/test.txt
+
+
+

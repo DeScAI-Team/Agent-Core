@@ -14,7 +14,10 @@ from docling.chunking import HybridChunker
 from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
 from docling_core.types.doc import PictureItem, TableItem
 from transformers import AutoTokenizer
-import anthropic
+from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # === CONFIG ===
 EMBED_MODEL_ID = "BAAI/bge-m3"
@@ -32,7 +35,11 @@ ALLOWED_SEMANTIC_CATEGORIES = {
     "other",
 }
 
-anthropic_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
+VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
+HEADING_MODEL = os.environ.get("VALIDATOR_MODEL", "/model")
+
+_heading_client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
 
 # === SETUP ===
 tokenizer = HuggingFaceTokenizer(
@@ -95,7 +102,7 @@ def _extract_json_object(raw_text):
 
 def get_semantic_heading_map(headings_list):
     """
-    Uses Anthropic Claude to map technical headings to functional categories.
+    Uses local vLLM endpoint to map technical headings to functional categories.
     """
     if not headings_list:
         return {}
@@ -114,19 +121,22 @@ def get_semantic_heading_map(headings_list):
 
     for attempt in range(1, HEADING_CLASSIFIER_RETRIES + 1):
         try:
-            response = anthropic_client.messages.create(
-                model="claude-opus-4-6",  # Fast and cheap for classification
+            response = _heading_client.chat.completions.create(
+                model=HEADING_MODEL,
                 max_tokens=1024,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_content}],
+                temperature=0,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
             )
 
-            raw_content = "".join(
-                block.text for block in response.content if hasattr(block, "text")
-            )
+            raw_content = response.choices[0].message.content or ""
+            raw_content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
+            raw_content = re.sub(r"<think>.*", "", raw_content, flags=re.DOTALL).strip()
             parsed_map = _extract_json_object(raw_content)
 
-            # Enforce strict key/value contract for downstream stability.
             cleaned_map = {}
             for heading in headings_list:
                 value = parsed_map.get(heading)
@@ -142,11 +152,11 @@ def get_semantic_heading_map(headings_list):
 
         except Exception as e:
             print(
-                f"  [WARN] Anthropic heading classification attempt "
+                f"  [WARN] heading classification attempt "
                 f"{attempt}/{HEADING_CLASSIFIER_RETRIES} failed: {e}"
             )
 
-    print("  [ERROR] Anthropic heading classification failed after retries; using 'other'.")
+    print("  [ERROR] heading classification failed after retries; using 'other'.")
     return {h: "other" for h in headings_list}
 
 

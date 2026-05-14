@@ -57,7 +57,13 @@ screener.json
                            weighted composite, review statement
     |
     v
-review.json (final)
+review.json (final)        (optional: overview.json from score.py)
+    |
+    v
+[8] evidence-doc.py        Audit Markdown: provenance, traceability (no LLM)
+    |
+    v
+evidence_audit.md
 ```
 
 ## Scripts
@@ -346,7 +352,8 @@ python screener.py \
 
 ### score.py
 
-Unified scoring step that runs after all other pipeline steps. Reads
+Unified scoring step that runs after `review.py`, `originality_check.py`, and
+`screener.py`. Reads
 `review.json` (with rationales from `review.py`, `originality_check.py`, and
 `screener.py`), recomputes all scores using consistent methodologies, computes
 a weighted composite score, and regenerates the review statement.
@@ -425,6 +432,49 @@ Add `--skip-llm` to skip review statement regeneration and keep the existing
 
 ---
 
+### evidence-doc.py
+
+Deterministic **audit trail** generator (no LLM). Runs **after** `score.py`. Reads
+final `review.json`, retrieve_compare output (`retrieve_compare_llm.json` or
+`retrieve_compare_out.json`), `screener.json`, and optionally `originality.json`;
+writes **`evidence_audit.md`** — compact Markdown for public-facing traceability
+alongside published `review.json` / `overview.json`.
+
+The document includes:
+
+- **Provenance:** UTC generation time, generator version, optional git revision,
+  `VALIDATOR_MODEL` env (upstream LLM steps), SHA-256 fingerprints of inputs,
+  which retrieve_compare filename was used.
+- **Composite score note:** pointer to `score.py` and live `dimension_weights`
+  from `mappings.json`.
+- **Category scores** table (from `review.json`).
+- **Evidence grade counts** and **claim-level detail** for non–self-reported
+  grades (same exclusion rule as `prep.SCORE_EXCLUDED_GRADES`).
+- **Screener findings** (quotes + observations).
+- **Originality** stats + top related works by similarity (no abstracts).
+
+Reference lines explain `(no verdict — missing abstract)` vs
+`(no verdict — ungraded)` instead of opaque placeholders.
+
+Default UTF-8 size budget **120 KiB** (`--max-bytes`); trimming drops rationale
+verbosity, screener `info`, strong/moderate claim rows, or switches to compact
+provenance before exceeding the limit. Use `--skip-provenance` for minimal
+output.
+
+**Input:** `review.json`; retrieve_compare JSON; `screener.json`;
+`originality.json` (optional)
+**Output:** `evidence_audit.md` (default: alongside `review.json` in the run dir)
+
+**CLI:**
+```
+python evidence-doc.py --directory /path/to/run -o evidence_audit.md
+```
+
+Orchestrators call this automatically as **step 13** after scoring (`run_pipe2.py`,
+`empirical-pipe.py`).
+
+---
+
 ## Prompts
 
 All prompts live in `prompts/` and are loaded at runtime:
@@ -448,15 +498,16 @@ All prompts live in `prompts/` and are loaded at runtime:
 Use `run_pipe2.py` at the repo root to run everything end-to-end:
 
 ```
-python run_pipe2.py                  # steps 1-12, LLM enabled
-python run_pipe2.py --from-step 6   # triage → evidence grading → review → originality → screener → scoring
-python run_pipe2.py --from-step 8   # prep + review + originality + screener + scoring
-python run_pipe2.py --from-step 10  # originality check + screener + scoring
-python run_pipe2.py --from-step 12  # unified scoring only (needs review.json + prepped_evidence + originality + screener)
+python run_pipe2.py                  # steps 1-13, LLM enabled
+python run_pipe2.py --from-step 6   # triage → evidence grading → review → originality → screener → scoring → evidence audit
+python run_pipe2.py --from-step 8   # prep + review + originality + screener + scoring + evidence audit
+python run_pipe2.py --from-step 10  # originality check + screener + scoring + evidence audit
+python run_pipe2.py --from-step 12  # unified scoring + evidence audit (needs review.json + prepped_evidence + originality + screener)
+python run_pipe2.py --from-step 13  # evidence audit only (needs review.json + retrieve_compare output + screener.json; originality optional)
 python run_pipe2.py --skip-llm      # skip LLM in retrieve_compare; originality + screener + scoring use --skip-llm too
 ```
 
-Steps 6–12 correspond to this folder's scripts:
+Steps 6–13 correspond to this folder's scripts:
 
 | Step | Script |
 |---|---|
@@ -467,12 +518,23 @@ Steps 6–12 correspond to this folder's scripts:
 | 10 | `originality_check.py` |
 | 11 | `screener.py` |
 | 12 | `score.py` |
+| 13 | `evidence-doc.py` |
+
+The same empirical steps (6–13) are run by `empirical-pipe.py` when driving the
+full pipeline from an input directory. **`empirical-pipe.py`** stores all
+intermediates under **`<research-folder>/steps/`** and publishes **`review.json`**,
+**`overview.json`**, and **`evidence_audit.md`** under **`<research-folder>/output/`**.
+The **`run_pipe2.py`** helper uses a **flat** layout in its output directory instead.
 
 ---
 
 ## Output files
 
-A typical run produces these files in the output directory:
+A typical run produces these files. Layout depends on the driver script:
+
+- **`empirical-pipe.py`:** intermediates below live under **`steps/`**; **`review.json`**,
+  **`overview.json`**, and **`evidence_audit.md`** under **`output/`**.
+- **`run_pipe2.py`:** the same filenames usually appear in one folder (see that script).
 
 | File | Description |
 |---|---|
@@ -482,6 +544,8 @@ A typical run produces these files in the output directory:
 | `prepped_evidence.json` | Claims with narrative sentences and grade distributions (scoring done by `score.py`) |
 | `pre_condensed_rationales.json` | Stage 2 rationales before condensation (debug artifact) |
 | `review.json` | Final structured review with unified scores, `composite_score`, rationales, score metadata (`score_method`, `claim_count`/`finding_count`/`compared_works`), and review statement |
+| `overview.json` | Plain-language companion to `review.json` (written by `score.py` when LLM overview is enabled) |
 | `originality_openalex_cache.json` | Cached OpenAlex search results (used by `originality_check.py`) |
 | `originality.json` | Full originality report: search terms, related works with similarity scores, originality score, and statement |
 | `screener.json` | Document screener diagnostic output: windows, findings by dimension, writer rationales |
+| `evidence_audit.md` | Human-readable audit trail from `evidence-doc.py`: provenance, scores, claim/citation trace, screener quotes, originality table (no LLM) |

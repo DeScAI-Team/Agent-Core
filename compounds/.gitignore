@@ -1,5 +1,0 @@
-# discover.py default output: <compound_dir>/report_<utc>.json
-/*/report_*.json
-
-# prepare.py default output next to reports (same compound folders)
-/*/prepared_*.json

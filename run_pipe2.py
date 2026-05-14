@@ -5,15 +5,16 @@ Quick pipeline re-run for document (10).
 Skips PDF read / add_data.py — uses existing text_knowledge_base.jsonl.
 Runs: spaCy tag → LLM extract → validate → classify → group → triage →
       retrieve_compare → prep evidence → generate review → originality →
-      screener → unified scoring.
+      screener → unified scoring → evidence audit Markdown.
 
 Output: articles/data/document (10)/pipe-test2/
 
 Usage:
-  python run_pipe2.py                  # full run (steps 1-12), LLM enabled
+  python run_pipe2.py                  # full run (steps 1-13), LLM enabled
   python run_pipe2.py --from-step 4    # resume from classify (needs validated_claims.jsonl)
   python run_pipe2.py --from-step 8    # just prep + review + originality + screener + scoring
-  python run_pipe2.py --from-step 12   # unified scoring only (needs review.json + prepped_evidence + originality + screener)
+  python run_pipe2.py --from-step 12   # unified scoring + evidence audit document
+  python run_pipe2.py --from-step 13   # evidence audit only (needs review.json + retrieve_compare output + screener.json)
   python run_pipe2.py --skip-llm       # run retrieve_compare WITHOUT LLM evidence grading
 """
 
@@ -59,8 +60,8 @@ def run(label: str, cmd: list[str], *, env: dict | None = None, cwd: Path | None
 def main():
     parser = argparse.ArgumentParser(description="Run pipe-test2 pipeline for document (10).")
     parser.add_argument(
-        "--from-step", type=int, default=1, choices=range(1, 13),
-        help="Start from this step (1=spacy, 2=extract, 3=validate, 4=classify, 5=group, 6=triage, 7=retrieve_compare, 8=prep_evidence, 9=review, 10=originality_check, 11=screener, 12=score)",
+        "--from-step", type=int, default=1, choices=range(1, 14),
+        help="Start from this step (1=spacy, 2=extract, 3=validate, 4=classify, 5=group, 6=triage, 7=retrieve_compare, 8=prep_evidence, 9=review, 10=originality_check, 11=screener, 12=score, 13=evidence-doc)",
     )
     parser.add_argument(
         "--model", type=str, default="/model",
@@ -90,7 +91,7 @@ def main():
         _spacy_out = CLAIM_EXTRACT / "test_output_tagged.jsonl"
         shutil.copy2(kb_dest, _spacy_in)
         run(
-            "Step 1/12 — spaCy tagging (text_knowledge_base → test_output_tagged)",
+            "Step 1/13 — spaCy tagging (text_knowledge_base → test_output_tagged)",
             [PY, str(CLAIM_EXTRACT / "spacy_test.py")],
         )
         shutil.move(str(_spacy_out), str(OUT / "test_output_tagged.jsonl"))
@@ -99,7 +100,7 @@ def main():
     # --- Step 2: LLM claim extraction ---
     if start <= 2:
         run(
-            "Step 2/12 — LLM claim extraction (test_output_tagged → final_claims_for_audit)",
+            "Step 2/13 — LLM claim extraction (test_output_tagged → final_claims_for_audit)",
             [PY, str(CLAIM_EXTRACT / "LLM_extract.py")],
             env=ce_env,
         )
@@ -107,7 +108,7 @@ def main():
     # --- Step 3: LLM validation ---
     if start <= 3:
         run(
-            "Step 3/12 — LLM validation (final_claims → validated_claims)",
+            "Step 3/13 — LLM validation (final_claims → validated_claims)",
             [PY, str(CLAIM_EXTRACT / "claim_validator.py")],
             env=ce_env,
         )
@@ -117,7 +118,7 @@ def main():
     classified = OUT / "classified_claims.jsonl"
     if start <= 4:
         run(
-            "Step 4/12 — Classify claims",
+            "Step 4/13 — Classify claims",
             [PY, str(PIPELINE / "classify_claims.py"), "-i", str(validated), "-o", str(classified)],
             env=base_env,
         )
@@ -126,7 +127,7 @@ def main():
     grouped = OUT / "grouped.json"
     if start <= 5:
         run(
-            "Step 5/12 — Group by dimension",
+            "Step 5/13 — Group by dimension",
             [PY, str(PIPELINE / "group.py"), str(classified), "-o", str(grouped), "--mappings", str(MAPPINGS)],
             env=base_env,
         )
@@ -135,7 +136,7 @@ def main():
     triaged = OUT / "triaged.json"
     if start <= 6:
         run(
-            "Step 6/12 — Triage into buckets",
+            "Step 6/13 — Triage into buckets",
             [PY, str(EMPIRICAL / "triage.py"), str(grouped), "-o", str(triaged), "--mappings", str(MAPPINGS)],
             env=base_env,
         )
@@ -155,7 +156,7 @@ def main():
         if not use_llm:
             rc_cmd.append("--skip-llm")
         run(
-            f"Step 7/12 — Retrieve & compare ({'WITH LLM' if use_llm else 'skip-llm'})",
+            f"Step 7/13 — Retrieve & compare ({'WITH LLM' if use_llm else 'skip-llm'})",
             rc_cmd,
             env=base_env,
         )
@@ -165,7 +166,7 @@ def main():
     prepped_evidence = OUT / "prepped_evidence.json"
     if start <= 8:
         run(
-            "Step 8/12 — Prep evidence narratives",
+            "Step 8/13 — Prep evidence narratives",
             [PY, str(EMPIRICAL / "prep.py"), str(rc_out), "-o", str(prepped_evidence)],
             env=base_env,
         )
@@ -181,7 +182,7 @@ def main():
             "--pre-condensed-dump", str(OUT / "pre_condensed_rationales.json"),
         ]
         run(
-            "Step 9/12 — Generate evidence-aware review",
+            "Step 9/13 — Generate evidence-aware review",
             review_cmd,
             env=base_env,
         )
@@ -201,7 +202,7 @@ def main():
         if args.skip_llm:
             originality_cmd.append("--skip-llm")
         run(
-            f"Step 10/12 — Originality check ({'WITH LLM' if not args.skip_llm else 'skip-llm'})",
+            f"Step 10/13 — Originality check ({'WITH LLM' if not args.skip_llm else 'skip-llm'})",
             originality_cmd,
             env=base_env,
         )
@@ -220,7 +221,7 @@ def main():
         if args.skip_llm:
             screener_cmd.append("--skip-llm")
         run(
-            f"Step 11/12 — Document screener ({'WITH LLM' if not args.skip_llm else 'skip-llm'})",
+            f"Step 11/13 — Document screener ({'WITH LLM' if not args.skip_llm else 'skip-llm'})",
             screener_cmd,
             env=base_env,
         )
@@ -240,8 +241,23 @@ def main():
         if args.skip_llm:
             score_cmd.append("--skip-llm")
         run(
-            f"Step 12/12 — Unified scoring ({'WITH LLM' if not args.skip_llm else 'skip-llm'})",
+            f"Step 12/13 — Unified scoring ({'WITH LLM' if not args.skip_llm else 'skip-llm'})",
             score_cmd,
+            env=base_env,
+        )
+
+    # --- Step 13: Evidence audit document ---
+    if start <= 13:
+        run(
+            "Step 13/13 — Evidence audit document",
+            [
+                PY,
+                str(EMPIRICAL / "evidence-doc.py"),
+                "--directory",
+                str(OUT),
+                "-o",
+                str(OUT / "evidence_audit.md"),
+            ],
             env=base_env,
         )
 
