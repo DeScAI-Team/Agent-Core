@@ -22,7 +22,7 @@ Usage:
     python run_dao_pipeline.py --batch crawlers/output/molecule/ipnfts \\
       --output-dir DAOs/molecule/output --model /model
 
-Environment: VLLM_BASE_URL, VLLM_API_KEY, VALIDATOR_MODEL, READ_PAPER_MODEL
+Environment: VLLM_BASE_URL, VLLM_API_KEY, VALIDATOR_MODEL, READ_PAPER_MODEL, WHISPER_CPP_BIN, WHISPER_MODEL_PATH
 """
 
 from __future__ import annotations
@@ -48,9 +48,10 @@ _ARTICLE_PIPELINE = _REPO_ROOT / "articles" / "pipeline"
 
 PY = sys.executable
 
-STEPS = ("filter", "ocr", "llm", "aggregate", "review", "score", "evidence", "upload")
+STEPS = ("multimedia", "ocr", "llm", "aggregate", "review", "score", "evidence", "upload")
 STEP_INDEX = {name: i for i, name in enumerate(STEPS)}
-# Backward compat: "process" maps to "ocr" (starts full article pipeline)
+# Backward compat
+STEP_INDEX["filter"] = STEP_INDEX["multimedia"]
 STEP_INDEX["process"] = STEP_INDEX["ocr"]
 
 
@@ -137,6 +138,75 @@ def _find_review_jsons(docs_dir: Path) -> list[Path]:
     return sorted(results)
 
 
+def _ensure_multimedia_bundle(
+    ipnft_dir: Path,
+    output_dir: Path,
+    model: str,
+    start_idx: int,
+    stop_idx: int,
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+    """Run multimedia step when requested or when bundle is missing."""
+    bundle_manifest = output_dir / "bundle" / "manifest.json"
+    should_run = (
+        start_idx <= STEP_INDEX["multimedia"] and stop_idx >= STEP_INDEX["multimedia"]
+    ) or (not bundle_manifest.exists())
+
+    if not should_run:
+        return None
+
+    if bundle_manifest.exists() and not args.overwrite and start_idx > STEP_INDEX["multimedia"]:
+        print(f"\n[multimedia] Using existing bundle: {output_dir / 'bundle'}")
+        return None
+
+    return run_multimedia(
+        ipnft_dir=ipnft_dir,
+        output_dir=output_dir,
+        model=model,
+        skip_llm=args.skip_llm,
+        skip_vision=args.skip_vision,
+        keep_temp=args.keep_temp,
+        overwrite=args.overwrite,
+    )
+
+
+def run_multimedia(
+    ipnft_dir: Path,
+    output_dir: Path,
+    model: str,
+    *,
+    skip_llm: bool = False,
+    skip_vision: bool = False,
+    keep_temp: bool = False,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Build multimedia bundle from IPNFT dataroom files."""
+    from multimedia_processor import process_ipnft
+
+    bundle_dir = output_dir / "bundle"
+    manifest_path = bundle_dir / "manifest.json"
+    if manifest_path.exists() and not overwrite:
+        print(f"\n[multimedia] Reusing existing bundle: {bundle_dir}")
+        results_path = output_dir / "bundle_results.json"
+        if results_path.exists():
+            return json.loads(results_path.read_text(encoding="utf-8"))
+        return {"reused": True, "bundle_dir": str(bundle_dir)}
+
+    print(f"\n[multimedia] Building bundle for {ipnft_dir.name}")
+    results = process_ipnft(
+        ipnft_dir,
+        bundle_dir,
+        text_model=model,
+        skip_llm=skip_llm,
+        skip_vision=skip_vision,
+        keep_temp=keep_temp,
+        overwrite=overwrite,
+    )
+    bundle_results_path = output_dir / "bundle_results.json"
+    bundle_results_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    return results
+
+
 def run_phase1(
     ipnft_dir: Path,
     output_dir: Path,
@@ -145,21 +215,21 @@ def run_phase1(
     overwrite: bool = False,
     stage: str = "full",
 ) -> dict[str, Any]:
-    """Phase 1: Filter docs and run article pipeline per PDF.
+    """Phase 1: Run article pipeline on bundle/pdf/articles/ PDFs.
 
     Args:
         stage: One of "full" (default), "ocr" (vision model only, stops after reader),
                or "llm" (text model only, resumes from add_data).
     """
-    from filter_docs import filter_docs
+    from multimedia_processor import list_article_pdfs
 
     docs_output = output_dir / "docs"
     docs_output.mkdir(parents=True, exist_ok=True)
 
-    candidates = filter_docs(ipnft_dir)
+    candidates = list_article_pdfs(output_dir / "bundle")
 
     stage_label = {"full": "", "ocr": " (OCR only)", "llm": " (text LLM)"}
-    print(f"\n[Phase 1{stage_label.get(stage, '')}] Processing {len(candidates)} PDFs from {ipnft_dir.name}")
+    print(f"\n[Phase 1{stage_label.get(stage, '')}] Processing {len(candidates)} article PDFs from bundle")
 
     results = {"processed": [], "failed": [], "skipped_count": 0, "stage": stage}
 
@@ -312,10 +382,18 @@ def run_single(args: argparse.Namespace) -> None:
     output_dir = args.output_dir.resolve() if args.output_dir else _DAO_ROOT / "molecule" / "output" / ipnft_dir.name
 
     model = _resolve_model(args.model)
-    from_step = args.from_step or "filter"
+    from_step = args.from_step or "multimedia"
     stop_after = args.stop_after
     start_idx = STEP_INDEX.get(from_step, 0)
     stop_idx = STEP_INDEX.get(stop_after, len(STEPS) - 1) if stop_after else len(STEPS) - 1
+
+    _ensure_multimedia_bundle(
+        ipnft_dir, output_dir, model, start_idx, stop_idx, args,
+    )
+
+    if stop_after and stop_idx <= STEP_INDEX["multimedia"]:
+        print(f"\n[Stopped after '{stop_after}'] — resume with --from-step ocr")
+        return
 
     # Phase 1: OCR stage (vision model)
     if start_idx <= STEP_INDEX["ocr"] and stop_idx >= STEP_INDEX["ocr"]:
@@ -375,7 +453,7 @@ def run_batch(args: argparse.Namespace) -> None:
     batch_dir = args.batch.resolve()
     base_output = args.output_dir.resolve() if args.output_dir else _DAO_ROOT / "molecule" / "output"
     model = _resolve_model(args.model)
-    from_step = args.from_step or "filter"
+    from_step = args.from_step or "multimedia"
     stop_after = args.stop_after
     start_idx = STEP_INDEX.get(from_step, 0)
     stop_idx = STEP_INDEX.get(stop_after, len(STEPS) - 1) if stop_after else len(STEPS) - 1
@@ -395,6 +473,13 @@ def run_batch(args: argparse.Namespace) -> None:
         output_dir = base_output / ipnft_dir.name
 
         try:
+            _ensure_multimedia_bundle(
+                ipnft_dir, output_dir, model, start_idx, stop_idx, args,
+            )
+
+            if stop_after and stop_idx <= STEP_INDEX["multimedia"]:
+                continue
+
             if start_idx <= STEP_INDEX["llm"]:
                 stage = "ocr" if stop_after == "ocr" else "llm" if from_step == "llm" else "full"
                 run_phase1(
@@ -445,17 +530,19 @@ def main() -> None:
     parser.add_argument("--model", type=str, help="LLM model path (default: $VALIDATOR_MODEL or /model)")
     parser.add_argument(
         "--from-step",
-        choices=list(STEPS) + ["process"],
+        choices=list(STEPS) + ["filter", "process"],
         default=None,
-        help="Resume from this step (default: filter). Steps: filter, ocr, llm, aggregate, review, score, evidence",
+        help="Resume from this step (default: multimedia). Steps: multimedia, ocr, llm, aggregate, ...",
     )
     parser.add_argument(
         "--stop-after",
-        choices=list(STEPS),
+        choices=list(STEPS) + ["filter"],
         default=None,
-        help="Stop after this step (e.g. 'ocr' to only run vision model, then swap and --from-step llm)",
+        help="Stop after this step (e.g. 'multimedia' for bundle only, 'ocr' for vision article OCR)",
     )
     parser.add_argument("--skip-llm", action="store_true", help="Skip LLM calls in synthesis")
+    parser.add_argument("--skip-vision", action="store_true", help="Skip image/video routes in multimedia step")
+    parser.add_argument("--keep-temp", action="store_true", help="Keep video frame temp files in bundle")
     parser.add_argument("--skip-upload", action="store_true", help="Skip Arweave upload after synthesis")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
 

@@ -1,8 +1,7 @@
 """Filter and categorize IPNFT dataroom documents for pipeline processing.
 
-Reads manifest.json and dataroom.json from an IPNFT directory, determines which
-files are science-relevant PDFs suitable for the article pipeline, and outputs
-an ordered list of PDF paths to process.
+DEPRECATED: Use multimedia_processor.py for routing all dataroom file types.
+This module remains for standalone PDF inspection/debugging.
 """
 
 from __future__ import annotations
