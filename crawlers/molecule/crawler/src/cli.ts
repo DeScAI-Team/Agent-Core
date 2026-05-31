@@ -1,6 +1,6 @@
+import "./load-repo-env.js"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import "dotenv/config"
 import {
   getAllProjects,
   getDataRoomHash,
@@ -71,7 +71,7 @@ orchestrate-profiles: same as profiles default out-dir, but only writes symbol f
 
 Catalog: ipnft(id) uses bare projectsV2 token id. Optional --compound-suffixes adds legacy compound ids after bare fails.
 IPTs: ipts(filterBy: { ipnftId }) for market rows (see https://docs.molecule.xyz/api-reference/data-api ).
-Set MOLECULE_API_KEY in .env or the environment.`)
+Set MOLECULE_API_KEY in the repo-root .env or the environment.`)
 }
 
 function parseLimit(): number | undefined {

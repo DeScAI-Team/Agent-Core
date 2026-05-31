@@ -31,7 +31,7 @@ ehthumbs.db
 Desktop.ini
 
 # venv
-agent/
+Agent/
 
 # cache
 .cursor/
@@ -49,6 +49,9 @@ crawlers/output/*
 !crawlers/output/.gitkeep
 DAOs/molecule/output/*
 !DAOs/molecule/output/.gitkeep
+
+crawlers/pump-science/*
+!crawlers/pump-science/.gitkeep
 
 # internal docs
 articles/CHANGES_self_reported_grading.md
