@@ -1,6 +1,13 @@
 # Molecule IPNFT crawler
 
-TypeScript CLI for Molecule catalog profiles, dataroom downloads, link aggregation, and web crawling.
+Ingestion route for [Agent Core](../../../README.md). TypeScript CLI for Molecule catalog profiles, dataroom downloads, link aggregation, and web crawling.
+
+## Agent Core integration
+
+- Run as part of the Agent Core crawl step (`python orchestrate.py`), or invoke this crawler directly
+- Output under `crawlers/output/molecule/ipnfts/<SYMBOL>/` is consumed by [`DAOs/molecule/pipeline/run_dao_review.py`](../../../DAOs/molecule/pipeline/run_dao_review.py)
+- See [DAOs/molecule/README.md](../../../DAOs/molecule/README.md) for the review pipeline
+- Crawler index: [crawlers/README.md](../../README.md)
 
 ## Setup
 

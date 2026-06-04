@@ -1,6 +1,8 @@
 # Molecule Research DAO Review Pipeline
 
-Pipeline that turns a crawled IPNFT dataroom into a published Research DAO review (`review.json` + `overview.json` + `evidence_audit.md`).
+Research DAO review route for [Agent Core](../../README.md). Turns a crawled IPNFT dataroom into a published review (`review.json` + `overview.json` + `evidence_audit.md`).
+
+[`orchestrate.py`](../../orchestrate.py) calls [`pipeline/run_dao_review.py`](pipeline/run_dao_review.py) for each folder under `crawlers/output/molecule/ipnfts/`.
 
 ## Flow
 
@@ -38,26 +40,39 @@ Composite score = weighted mean of per-category scores (weights in [`dao_mapping
 
 ## Quickstart
 
+From the repository root:
+
 ```bash
 # Single DAO
 python DAOs/molecule/pipeline/run_dao_review.py \
-  --ipnft-dir output/molecule/ipnfts/BeeARD
+  --ipnft-dir crawlers/output/molecule/ipnfts/BeeARD
+
+# Explicit output dir (default is reviews/DAOs/<SYMBOL>/)
+python DAOs/molecule/pipeline/run_dao_review.py \
+  --ipnft-dir crawlers/output/molecule/ipnfts/BeeARD \
+  --output-dir reviews/DAOs/BeeARD
 
 # Reuse an existing bundle (skip the OCR/vision/whisper rebuild)
 python DAOs/molecule/pipeline/run_dao_review.py \
-  --ipnft-dir output/molecule/ipnfts/BeeARD --reuse-bundle
+  --ipnft-dir crawlers/output/molecule/ipnfts/BeeARD --reuse-bundle
 
 # Skip vision entirely (text-only smoke run)
 python DAOs/molecule/pipeline/run_dao_review.py \
-  --ipnft-dir output/molecule/ipnfts/BeeARD --skip-vision
+  --ipnft-dir crawlers/output/molecule/ipnfts/BeeARD --skip-vision
 
 # Resume from a specific stage
 python DAOs/molecule/pipeline/run_dao_review.py \
-  --ipnft-dir output/molecule/ipnfts/BeeARD --from-step review
+  --ipnft-dir crawlers/output/molecule/ipnfts/BeeARD --from-step review
 
 # Batch
 python DAOs/molecule/pipeline/run_dao_review.py \
-  --batch output/molecule/ipnfts
+  --batch crawlers/output/molecule/ipnfts
+```
+
+Upload via orchestrator or manually:
+
+```bash
+python -m uploader --recipe dao --dir reviews/DAOs/BeeARD/review
 ```
 
 ## Environment
@@ -85,4 +100,9 @@ python DAOs/molecule/pipeline/run_dao_review.py \
 | overview | [`overview.py`](pipeline/overview.py) | `review/overview.json` |
 | evidence | [`evidence_audit.py`](pipeline/evidence_audit.py) | `review/evidence_audit.md` |
 
-Each stage script is independently runnable for debugging; the orchestrator just chains them in order.
+Each stage script is independently runnable for debugging; the orchestrator chains them in order.
+
+## Related documentation
+
+- Molecule crawler (produces crawl input): [crawlers/molecule/crawler/README.md](../../crawlers/molecule/crawler/README.md)
+- Agent Core overview: [README.md](../../README.md)

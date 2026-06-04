@@ -1,8 +1,20 @@
 # Articles Pipeline
 
-This folder contains the full claim extraction and evidence review pipeline for empirical research papers. All scripts live under `pipeline/` and are driven end-to-end by `run_pipe2.py` at the repo root.
+Research-paper review route for [Agent Core](../README.md). Claim extraction, validation, routing, and evidence grading live under `pipeline/`. The entry driver is [`pipeline/run_full_pipeline.py`](pipeline/run_full_pipeline.py), invoked directly or by [`orchestrate.py`](../orchestrate.py) for each paper in `crawlers/output/researchhub/papers/`.
 
-## Pipeline overview (13 steps)
+## Top-level stages (`run_full_pipeline.py`)
+
+| Stage | What it does |
+|-------|--------------|
+| `fetch` | Download PDF from URL (or use local path) |
+| `reader` | OCR / vision read → `steps/full.md` |
+| `add_data` | Chunk PDF → `text_knowledge_base.jsonl` |
+| `route` | Classify paper type (empirical, theoretical_narrative, protocol) |
+| `pipeline` | Run the matched sub-pipeline through to `review/` outputs |
+
+Sub-pipelines share steps 1–5 (claim extract → classify → group). The **empirical** route continues with steps 6–13 below.
+
+## Empirical pipeline (13 steps)
 
 | Step | Script | Input | Output |
 |------|--------|-------|--------|
@@ -20,85 +32,71 @@ This folder contains the full claim extraction and evidence review pipeline for 
 | 12 | `pipeline/empirical/score.py` | `review.json` + all intermediates | `review.json` (final scores + composite) |
 | 13 | `pipeline/empirical/evidence-doc.py` | `review.json` + intermediates | `evidence_audit.md` |
 
-Steps 1–5 extract, validate, classify, and group claims. Steps 6–13 (the **empirical evidence pipeline**) grade those claims against cited references, assess originality, screen the full document, compute unified scores, and produce an audit trail. See [`pipeline/empirical/PIPELINE.md`](pipeline/empirical/PIPELINE.md) for detailed documentation of steps 6–13.
+Steps 1–5 extract, validate, classify, and group claims. Steps 6–13 grade those claims against cited references, assess originality, screen the full document, compute unified scores, and produce an audit trail. See [`pipeline/empirical/PIPELINE.md`](pipeline/empirical/PIPELINE.md) for detailed documentation of steps 6–13.
 
 ## Prerequisites
 
 - Python 3.10+
 - `openai`, `python-dotenv` (LLM steps)
-- `docling`, `spacy`, `transformers` (PDF chunking and tagging — step 0 / `add_data.py`)
-- A reachable vLLM (or OpenAI-compatible) server; see the root [README.md](../README.md) for base URL and model configuration.
+- `docling`, `spacy`, `transformers` (PDF chunking and tagging)
+- A reachable vLLM (or OpenAI-compatible) server — see the root [README.md](../README.md) for base URL and model configuration
 
 ## Running
 
 From the **repository root**:
 
 ```bash
-python run_pipe2.py                  # full run (steps 1-13)
-python run_pipe2.py --from-step 4    # resume from classify
-python run_pipe2.py --from-step 6    # triage onward (empirical pipeline)
-python run_pipe2.py --from-step 12   # unified scoring + evidence audit
-python run_pipe2.py --skip-llm       # skip LLM evidence grading
+python articles/pipeline/run_full_pipeline.py https://example.com/paper.pdf
+python articles/pipeline/run_full_pipeline.py paper.pdf --from-step add_data
+python articles/pipeline/run_full_pipeline.py paper.pdf --stop-after reader
+python articles/pipeline/run_full_pipeline.py reviews/articles/<stem>/   # resume existing run
 ```
 
-`run_pipe2.py` expects a pre-existing `text_knowledge_base.jsonl` (produced by `pipeline/claim-extract/add_data.py` or copied manually). Use `--model` to override the vLLM model name.
+Use `--from-step` / `--stop-after` with stages: `fetch`, `reader`, `add_data`, `route`, `pipeline`. Add `--skip-llm` to skip LLM calls in downstream sub-pipelines.
 
 ## Directory layout
 
 ```
 articles/
 ├── pipeline/
+│   ├── run_full_pipeline.py  Entry driver (fetch → route → sub-pipeline)
 │   ├── claim-extract/        Steps 1-3: spaCy tagging, LLM extraction, validation
-│   │   ├── add_data.py       PDF → text_knowledge_base.jsonl (step 0)
+│   │   ├── add_data.py       PDF → text_knowledge_base.jsonl
 │   │   ├── spacy_test.py
 │   │   ├── LLM_extract.py
 │   │   └── claim_validator.py
 │   ├── classify_claims.py    Step 4: semantic claim-type tags
 │   ├── group.py              Step 5: group by scoring dimension
-│   ├── prep.py               Legacy prep (claim narratives only)
-│   ├── review.py             Legacy review (claim-only rationales)
 │   ├── read-paper.py         Standalone PDF reader
-│   ├── classify-paper.py     Standalone paper classifier
-│   ├── journal-article.py    Journal-article helper
+│   ├── classify-paper.py     Paper type classifier (routing)
 │   ├── mappings.json         Dimension definitions, tag index, weights, rubrics
-│   └── empirical/            Steps 6-13: evidence grading pipeline
-│       ├── PIPELINE.md       Detailed docs for empirical stages
-│       ├── triage.py
-│       ├── retrieve_compare.py
-│       ├── prep.py
-│       ├── review.py
-│       ├── originality_check.py
-│       ├── screener.py
-│       ├── score.py
-│       ├── evidence-doc.py
-│       ├── empirical-pipe.py  Standalone empirical driver (steps/ + output/ layout)
-│       └── prompts/           LLM prompt templates for each empirical stage
-├── prompts/                   Shared prompts (classification, verdict fallbacks, etc.)
-└── data/                      Per-paper run folders (gitignored)
+│   ├── empirical/            Steps 6-13: evidence grading pipeline
+│   ├── Theoretical-narrative/  Theoretical paper sub-pipeline
+│   └── Protocol-pre_results/   Protocol paper sub-pipeline
+├── prompts/                  Shared prompts (classification, verdict fallbacks, etc.)
+└── llm_env.py                LLM endpoint config (shared with proposals/compounds)
 ```
 
 ## Configuration
 
-Set via `.env` in the repo root (`articles/llm_env.py` loads it). Three endpoints:
+Set via `.env` in the repo root (`articles/llm_env.py` loads it):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLM_BASE_URL` / `LLM_API_KEY` | `:8000` | Review LLM (extract, validate, evidence, screener, score) |
 | `LLM_MODEL` / `VALIDATOR_MODEL` | `/model` | Review model id (`VALIDATOR_MODEL` is a deprecated alias) |
-| `TAGGER_BASE_URL` / `TAGGER_API_KEY` | falls back to `LLM_*` | Claim classification + heading labels (`classify_claims`, `add_data`) |
+| `TAGGER_BASE_URL` / `TAGGER_API_KEY` | falls back to `LLM_*` | Claim classification + heading labels |
 | `TAGGER_MODEL` | auto / `CLASSIFIER_MODEL` | Tagger model id |
-| `VISION_MODEL_URL` / `VISION_MODEL_API_KEY` | `:8001` | PDF OCR (`read-paper.py`) |
+| `VISION_MODEL_URL` / `VISION_MODEL_API_KEY` | `:8001` | PDF OCR |
 | `READ_PAPER_MODEL` | `nanonets/Nanonets-OCR2-3B` | Vision OCR model id |
 | `VALIDATOR_CONCURRENCY` | `15` | Max concurrent validation requests (step 3) |
 
-## Output layout (`run_full_pipeline.py`)
+## Output layout
 
 Per paper under `reviews/articles/<pdf_stem>/`:
 
 - `steps/` — `full.md`, knowledge base, claim JSONL, triage/retrieve caches, screener, originality
 - `review/` — `review.json`, `overview.json`, `evidence_audit.md`
-
-Standalone `empirical-pipe.py` into `articles/data/` may still use title-derived folders and legacy `output/` unless `--run-dir` is passed.
 
 ## Key outputs
 
@@ -110,6 +108,5 @@ Standalone `empirical-pipe.py` into `articles/data/` may still use title-derived
 
 ## Related documentation
 
-- Root pipeline overview and vLLM config: [README.md](../README.md)
+- Agent Core overview: [README.md](../README.md)
 - Empirical evidence pipeline details: [pipeline/empirical/PIPELINE.md](pipeline/empirical/PIPELINE.md)
-- Cluster / full-run notes: [RUN_FULL_PIPELINE.md](../RUN_FULL_PIPELINE.md)

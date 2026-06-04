@@ -1,6 +1,8 @@
 # Pipeline snapshotter
 
-Bundles **`crawlers/output`** and **`reviews/`** into `snapshot.tar.zst`, then uploads to a **private** Cloudflare R2 bucket.
+Backup route for [Agent Core](../README.md). Bundles **`crawlers/output`** and **`reviews/`** into `snapshot.tar.zst`, then uploads to a **private** Cloudflare R2 bucket.
+
+Invoked as the final step of [`orchestrate.py`](../orchestrate.py), or standalone via `python orchestrate.py --just-snapshot`.
 
 ## Setup
 
@@ -72,3 +74,7 @@ CLI flags `--r2-endpoint`, `--r2-bucket`, `--r2-access-key-id`, `--r2-secret-acc
 `snapshot-receipt.json` records `bucket`, `object_key`, `s3_uri`, `endpoint`, optional `presigned_url`, and `presigned_expires_at`.
 
 `zstd` may require system `libzstd` (libzstd-dev on Debian/Ubuntu).
+
+## Related documentation
+
+- Agent Core overview: [README.md](../README.md)

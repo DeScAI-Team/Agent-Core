@@ -1,8 +1,8 @@
 # Unified Arweave Uploader
 
-Standalone upload module for Review-Generator pipeline outputs. Reads wallet configuration from the **repo-root [`.env`](../.env)** only (`PATH_TO_KEYFILE`, `AGENT_WALLET`).
+Standalone upload module for [Agent Core](../README.md) pipeline outputs. Reads wallet configuration from the **repo-root [`.env`](../.env)** only (`PATH_TO_KEYFILE`, `AGENT_WALLET`).
 
-Article and proposal pipelines no longer upload in-process; [`orchestrate.py`](../orchestrate.py) runs this module as step 6 (or invoke manually).
+Pipelines no longer upload in-process. [`orchestrate.py`](../orchestrate.py) runs this module **after each review item** completes. The final orchestrator step is R2 snapshot (`python -m snapshotter`), not upload.
 
 ## Setup
 
@@ -27,8 +27,8 @@ From the repo root:
 ```bash
 python -m uploader --recipe article --dir reviews/articles/<stem>/review [--resume]
 python -m uploader --recipe proposal --dir reviews/proposals/proposal_<id>/review [--resume]
-python -m uploader --recipe dao --dir DAOs/molecule/output/CLAW/synthesis [--resume]
-python -m uploader --recipe compounds --dir path/to/compound/output [--resume]
+python -m uploader --recipe dao --dir reviews/DAOs/<SYMBOL>/review [--resume]
+python -m uploader --recipe compounds --dir reviews/compounds/<TICKER>/review [--resume]
 python -m uploader --recipe crawl-log --file crawlers/output/crawl-log.json [--output-dir crawlers/output]
 ```
 
@@ -95,7 +95,7 @@ Tags: `doctype=crawllog`, `Crawl-Date`, `Content-Type=application/json`
 ```python
 from uploader.runner import run_recipe
 
-run_recipe("article", dir="articles/data/foo/output", resume=False)
+run_recipe("article", dir="reviews/articles/<stem>/review", resume=False)
 run_recipe("crawl-log", file="crawlers/output/crawl-log.json")
 ```
 
@@ -106,3 +106,7 @@ Writes `upload_metadata.json` to `--output-dir` with transaction IDs, URLs, and 
 ## Node layer
 
 Uploads use Turbo SDK via `arweaveService.js` / `arweaveServiceCLI.js` in this directory (`npm install` required).
+
+## Related documentation
+
+- Agent Core overview: [README.md](../README.md)

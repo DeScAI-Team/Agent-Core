@@ -1,6 +1,8 @@
-# pump-science
+# Compounds Pipeline (Pump Science)
 
-End-to-end pipeline for screening a compound's longevity research potential using public APIs and local LLM inference. All outputs are **research screening aids only — not medical advice, prescribing guidance, or regulatory submissions**.
+Compound screening route for [Agent Core](../README.md). End-to-end pipeline for screening a compound's longevity research potential using public APIs and local LLM inference. All outputs are **research screening aids only — not medical advice, prescribing guidance, or regulatory submissions**.
+
+[`orchestrate.py`](../orchestrate.py) invokes [`compounds/orchestrate.py`](orchestrate.py) for each token in `crawlers/output/pump.science/compound-tokens.json`. Single-compound runs use [`pipeline/single/run_review.py`](pipeline/single/run_review.py) directly.
 
 ---
 
@@ -16,7 +18,7 @@ pip install -r requirements.txt
 
 ## Pipeline at a glance
 
-Run the full chain with **`pipeline/single/run_review.py --compound <name>`** (or `orchestrate.py` when wired to the same path):
+Run the full chain with **`pipeline/single/run_review.py --compound <name>`** (single compound) or **`compounds/orchestrate.py --compounds ...`** (multi-compound bundles). The top-level agent uses root [`orchestrate.py`](../orchestrate.py).
 
 ```
 discover.py --incremental  →  material.json (+ delta-tag each round → longevity/risk JSONL)
@@ -212,7 +214,7 @@ python pipeline/overview.py ../reviews/compounds/OMIGU/review/review.json
 |----------|---------|---------|
 | `REVIEWER_MODEL` | falls back to `TAGGER_MODEL` → `CLASSIFIER_MODEL` → `VALIDATOR_MODEL` | Model for all three passes |
 | `REVIEWER_MAX_TOKENS` | `2048` | Completion budget per pass |
-| `LLM_BASE_URL`, `LLM_API_KEY` | same as `tag.py` | API endpoint |
+| `LLM_BASE_URL`, `LLM_API_KEY` | same as [`llm_env.py`](llm_env.py) | API endpoint |
 
 ---
 
@@ -252,3 +254,8 @@ All paths are relative to `reviews/compounds/<TICKER>/`.
 ## Deep technical reference
 
 For the full pipeline logic — prompt text, parsing code, allowlists, scoring formulas, environment variables, and guidance for adding features or fixing bugs — see **[REVIEW_LOGIC.md](REVIEW_LOGIC.md)**.
+
+## Related documentation
+
+- Agent Core overview: [README.md](../README.md)
+- Review logic deep dive: [REVIEW_LOGIC.md](REVIEW_LOGIC.md)
