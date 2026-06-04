@@ -2,7 +2,7 @@
 
 Standalone upload module for Review-Generator pipeline outputs. Reads wallet configuration from the **repo-root [`.env`](../.env)** only (`PATH_TO_KEYFILE`, `AGENT_WALLET`).
 
-Existing per-pipeline uploaders are unchanged; use this module directly until pipelines are wired later.
+Article and proposal pipelines no longer upload in-process; [`orchestrate.py`](../orchestrate.py) runs this module as step 6 (or invoke manually).
 
 ## Setup
 
@@ -25,8 +25,8 @@ Paths in `PATH_TO_KEYFILE` are resolved relative to the **repo root** if not abs
 From the repo root:
 
 ```bash
-python -m uploader --recipe article --dir articles/data/foo/output [--resume]
-python -m uploader --recipe proposal --dir proposals/data/4459 [--resume]
+python -m uploader --recipe article --dir reviews/articles/<stem>/review [--resume]
+python -m uploader --recipe proposal --dir reviews/proposals/proposal_<id>/review [--resume]
 python -m uploader --recipe dao --dir DAOs/molecule/output/CLAW/synthesis [--resume]
 python -m uploader --recipe compounds --dir path/to/compound/output [--resume]
 python -m uploader --recipe crawl-log --file crawlers/output/crawl-log.json [--output-dir crawlers/output]
@@ -54,28 +54,35 @@ python -m uploader --recipe article \
 
 ## Recipes
 
+All review recipes (article, proposal, dao, compounds) use the same 3-step pattern:
+
+1. Upload evidence markdown
+2. Upload review JSON (temp copy with `evidence_audit` field injected after `review_date`)
+3. Upload overview JSON (same `evidence_audit` field injection)
+
+Source files on disk are never modified. `review_statement` text is unchanged on upload.
+
 ### Article (3 steps)
 
 Inputs in `--dir`: `evidence_audit.md`, `review.json`, `overview.json`
 
-1. Upload evidence → append link to `review.json` → upload review → append link to `overview.json` → upload overview
-2. Tags: `doctype`, `platform=ResearchHub`, `category=Article`, `research_name`, `review_date`
+Tags: `doctype`, `platform=ResearchHub`, `category=Article`, `research_name`, `review_date`
 
-### Proposal (2 steps)
+### Proposal (3 steps)
 
-Inputs: `evidence_audit.md`, `review.json`
+Inputs: `evidence_audit.md`, `review.json`, `overview.json`
 
-Tags: `platform=ResearchHub`, `category=Proposal`, `doctype` (`EvidenceAudit` / `review`), `name`, `date`
+Tags: `platform=ResearchHub`, `category=Proposal`, `doctype` (`EvidenceAudit` / `review` / `overview`), `name`, `date`
 
 ### DAO (3 steps)
 
-Inputs: `dao_evidence_audit.md`, `dao_review.json`, `overview.json`
+Inputs: `evidence_audit.md`, `review.json`, `overview.json`
 
 Tags: `doctype`, `DaoName`, `platform=Molecule`, `category=ResearchDAO`, `date`
 
-### Compounds (2 steps)
+### Compounds (3 steps)
 
-Inputs: `evidence_audit.md` and `*-review.json` (or `review.json`)
+Inputs: `evidence_audit.md`, `*-review.json` (or `review.json`), `overview.json`
 
 Tags: `doctype`, `platform=PumpScience`, `category=compounds`, `compounds`, `date`
 
@@ -94,7 +101,7 @@ run_recipe("crawl-log", file="crawlers/output/crawl-log.json")
 
 ## Output
 
-Writes `upload_metadata.json` to `--output-dir` with transaction IDs, URLs, and tags per step. Source files on disk are never modified (only temp copies with appended links are uploaded).
+Writes `upload_metadata.json` to `--output-dir` with transaction IDs, URLs, and tags per step. Source files on disk are never modified (only temp copies with the injected `evidence_audit` field are uploaded).
 
 ## Node layer
 

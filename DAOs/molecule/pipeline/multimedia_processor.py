@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""Multimedia router: inventory dataroom files and build a structured processing bundle.
+"""Multimedia router: inventory dataroom files and build a JSON+MD bundle.
 
 Reads manifest.json + downloaded files from an IPNFT directory, routes each file
-by type (PDF, image, video, text), and writes outputs under {output_dir}/bundle/.
+by type, and writes structured outputs under {output_dir}/bundle/:
+
+  bundle/pdf/<stem>.json         — sectioned OCR text + metadata
+  bundle/images/<stem>.json      — vision caption + labels
+  bundle/videos/<stem>/frames.jsonl — per-frame caption + audio transcript
+  bundle/text/<stem>.md          — extracted plaintext
+
+Crawler-produced *.md files in the IPNFT directory itself are NOT copied here;
+the chunk step reads them in place.
 
 Env:
-  VLLM_BASE_URL, VLLM_API_KEY — vision model endpoint
-  READ_PAPER_MODEL — vision/OCR model (default: nanonets/Nanonets-OCR2-3B)
-  VALIDATOR_MODEL — text LLM for PDF classification
-
-Video/audio:
-  ffmpeg, ffprobe on PATH
-  WHISPER_CPP_BIN (default: whisper-cli)
-  WHISPER_MODEL_PATH (default: models/ggml-small.bin)
+  VLLM_BASE_URL, VLLM_API_KEY      — vision model endpoint
+  READ_PAPER_MODEL                 — vision/OCR model (default: nanonets/Nanonets-OCR2-3B)
+  WHISPER_CPP_BIN, WHISPER_MODEL_PATH — whisper.cpp for video audio
+  ffmpeg / ffprobe on PATH
 
 Usage:
   python multimedia_processor.py \\
-    --ipnft-dir crawlers/output/molecule/ipnfts/CLAW \\
-    --output-dir reviews/DAOs/CLAW
+    --ipnft-dir output/molecule/ipnfts/BeeARD \\
+    --output-dir reviews/DAOs/BeeARD
 """
 
 from __future__ import annotations
@@ -48,8 +52,21 @@ if str(_PIPELINE_DIR) not in sys.path:
 from file_inventory import inventory_files  # noqa: E402
 from routes import process_image, process_pdf, process_text, process_video  # noqa: E402
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
+if load_dotenv:
+    _env_path = _REPO_ROOT / ".env"
+    if _env_path.exists():
+        load_dotenv(_env_path)
+
+VLLM_BASE_URL = (
+    os.environ.get("VISION_MODEL_URL")
+    or os.environ.get("VLLM_BASE_URL")
+    or "http://localhost:8000/v1"
+)
+VLLM_API_KEY = (
+    os.environ.get("VISION_MODEL_API_KEY")
+    or os.environ.get("VLLM_API_KEY")
+    or "none"
+)
 READ_PAPER_MODEL = os.environ.get("READ_PAPER_MODEL", "nanonets/Nanonets-OCR2-3B")
 
 
@@ -61,14 +78,7 @@ def _load_env() -> None:
 
 
 def _ensure_bundle_dirs(bundle_dir: Path) -> None:
-    for sub in (
-        "pdf/articles",
-        "pdf/proposals",
-        "pdf/other",
-        "images",
-        "videos",
-        "text",
-    ):
+    for sub in ("pdf", "images", "videos", "text"):
         (bundle_dir / sub).mkdir(parents=True, exist_ok=True)
 
 
@@ -76,13 +86,9 @@ def process_ipnft(
     ipnft_dir: Path,
     bundle_dir: Path,
     *,
-    text_model: str,
     vision_model: str | None = None,
     vision_base_url: str | None = None,
     vision_api_key: str | None = None,
-    text_base_url: str | None = None,
-    text_api_key: str | None = None,
-    skip_llm: bool = False,
     skip_vision: bool = False,
     keep_temp: bool = False,
     overwrite: bool = False,
@@ -95,8 +101,6 @@ def process_ipnft(
     v_model = vision_model or READ_PAPER_MODEL
     v_url = vision_base_url or VLLM_BASE_URL
     v_key = vision_api_key or VLLM_API_KEY
-    t_url = text_base_url or VLLM_BASE_URL
-    t_key = text_api_key or VLLM_API_KEY
 
     vision_client = OpenAI(base_url=v_url, api_key=v_key)
 
@@ -119,21 +123,15 @@ def process_ipnft(
         try:
             if route == "pdf":
                 if skip_vision:
-                    from routes._utils import copy_file_unique
-
-                    dest = copy_file_unique(source, bundle_dir / "pdf" / "other")
-                    out = {"route": "pdf", "document_type": "other", "output_path": str(dest), "fallback": True}
-                else:
-                    out = process_pdf(
-                        source,
-                        bundle_dir,
-                        vision_client=vision_client,
-                        vision_model=v_model,
-                        text_model=text_model,
-                        text_base_url=t_url,
-                        text_api_key=t_key,
-                        skip_llm=skip_llm,
-                    )
+                    results["skipped_vision"].append({"filename": source.name, "route": route})
+                    continue
+                out = process_pdf(
+                    source,
+                    bundle_dir,
+                    vision_client=vision_client,
+                    vision_model=v_model,
+                    overwrite=overwrite,
+                )
             elif route == "image":
                 if skip_vision:
                     results["skipped_vision"].append({"filename": source.name, "route": route})
@@ -211,17 +209,6 @@ def process_ipnft(
     return results
 
 
-def list_article_pdfs(bundle_dir: Path) -> list[dict[str, Any]]:
-    """Return article PDFs from bundle for Phase 1 article pipeline."""
-    articles_dir = bundle_dir / "pdf" / "articles"
-    if not articles_dir.is_dir():
-        return []
-    return [
-        {"filename": p.name, "path": p, "reason": "bundle_article"}
-        for p in sorted(articles_dir.glob("*.pdf"))
-    ]
-
-
 def main() -> None:
     _load_env()
 
@@ -233,10 +220,8 @@ def main() -> None:
         required=True,
         help="DAO output dir; bundle written to {output-dir}/bundle/",
     )
-    parser.add_argument("--model", type=str, default=os.environ.get("VALIDATOR_MODEL", "/model"))
     parser.add_argument("--vision-model", type=str, default=None)
-    parser.add_argument("--skip-llm", action="store_true", help="Route all PDFs to pdf/other")
-    parser.add_argument("--skip-vision", action="store_true", help="Skip image/video routes")
+    parser.add_argument("--skip-vision", action="store_true", help="Skip PDF/image/video vision routes")
     parser.add_argument("--keep-temp", action="store_true", help="Keep video frame temp files")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -251,9 +236,7 @@ def main() -> None:
     results = process_ipnft(
         ipnft_dir,
         bundle_dir,
-        text_model=args.model,
         vision_model=args.vision_model,
-        skip_llm=args.skip_llm,
         skip_vision=args.skip_vision,
         keep_temp=args.keep_temp,
         overwrite=args.overwrite,

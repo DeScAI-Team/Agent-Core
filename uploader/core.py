@@ -106,13 +106,43 @@ def run_node_upload(file_path: Path, tags: list[dict[str, str]]) -> dict[str, An
         return {"success": False, "error": f"Subprocess error: {e}"}
 
 
-def append_review_statement(json_path: Path, append_text: str) -> Path:
-    """Return a temp copy of json_path with append_text added to review_statement."""
+def _insert_after_key(data: dict[str, Any], after: str, key: str, value: str) -> dict[str, Any]:
+    """Return new dict with key/value inserted immediately after after (or at end)."""
+    if key in data:
+        data = {k: v for k, v in data.items() if k != key}
+    ordered: dict[str, Any] = {}
+    inserted = False
+    for k, v in data.items():
+        ordered[k] = v
+        if k == after:
+            ordered[key] = value
+            inserted = True
+    if not inserted:
+        ordered[key] = value
+    return ordered
+
+
+def inject_evidence_audit(json_path: Path, evidence_txid: str) -> Path:
+    """Return a temp copy of json_path with evidence_audit inserted after review_date."""
     with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
-    if "review_statement" not in data:
-        raise ValueError(f"No 'review_statement' field found in {json_path}")
-    data["review_statement"] = data["review_statement"] + append_text
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object in {json_path}")
+
+    url = f"https://arweave.net/{evidence_txid}"
+    if "review_date" in data:
+        data = _insert_after_key(data, "review_date", "evidence_audit", url)
+    elif "compound_token" in data:
+        data = _insert_after_key(data, "compound_token", "evidence_audit", url)
+    elif "research_name" in data:
+        data = _insert_after_key(data, "research_name", "evidence_audit", url)
+    else:
+        first_key = next(iter(data), None)
+        if first_key is None:
+            data["evidence_audit"] = url
+        else:
+            data = _insert_after_key(data, first_key, "evidence_audit", url)
+
     temp_fd, temp_path = tempfile.mkstemp(suffix=".json", prefix="upload_", text=True)
     try:
         with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
@@ -169,19 +199,16 @@ def read_tag_context(recipe: Recipe, files: dict[str, Path]) -> dict[str, Any]:
     if recipe.name == "proposal":
         ctx["name"] = data.get("research_name", data.get("proposal_name", ""))
     elif recipe.name == "dao":
-        ctx["dao_name"] = data.get("research_name", "")
+        ctx["dao_name"] = (
+            data.get("research_dao")
+            or data.get("ipnft_symbol")
+            or data.get("research_name", "")
+        )
     elif recipe.name == "compounds":
-        ctx["compound_name"] = data.get("research_name", "")
+        ctx["compound_name"] = data.get("compound_token") or data.get("research_name", "")
         ctx["review_file"] = str(review_path)
         ctx["evidence_file"] = str(files["evidence"])
     return ctx
-
-
-def _format_append(template: str, txids: dict[str, str]) -> str:
-    return template.format(
-        evidence_txid=txids.get("evidence_txid", ""),
-        review_txid=txids.get("review_txid", ""),
-    )
 
 
 def _step_entry(result: dict[str, Any], tags: list[dict[str, str]]) -> dict[str, Any]:
@@ -270,10 +297,16 @@ def run_sequential_upload(
         upload_path = source_path
         temp_path: Path | None = None
 
-        if step.modified and step.append_template:
-            append_text = _format_append(step.append_template, txids)
+        if step.inject_evidence_audit:
+            evidence_txid = txids.get("evidence_txid", "")
+            if not evidence_txid:
+                msg = "Missing evidence txid for evidence_audit field injection"
+                print(f"\n  Error: {msg}", file=sys.stderr)
+                metadata[step.metadata_key] = {"error": msg}
+                save_metadata(output_dir, metadata)
+                return {"success": False, "error": msg, "metadata": metadata}
             try:
-                temp_path = append_review_statement(source_path, append_text)
+                temp_path = inject_evidence_audit(source_path, evidence_txid)
                 upload_path = temp_path
             except Exception as e:
                 msg = f"Failed to create modified JSON: {e}"

@@ -8,6 +8,8 @@ The user sends a JSON object with:
   - `risk_rationale` — the per-compound risk paragraph already written
   - `spl_available` — whether FDA drug label data was present for this compound
   - `spl_interaction_excerpts` — list of drug interaction text excerpts from FDA labels (may be empty)
+  - `interaction_evidence` — short snippets from discover/tagged rows marked `interaction_or_combination_risk` (may be empty)
+  - `risk_tagged_count` — number of such tagged interaction rows for this compound
 
 ---
 
@@ -21,7 +23,7 @@ Write **one prose paragraph of 5–8 sentences** that synthesizes material risks
 
 - For each compound with a substantive `risk_rationale`, summarize the primary concern in one clause.
 - For compounds where the rationale states that safety evidence was **limited or not found**, say so plainly — do not treat missing data as evidence of safety.
-- If any compound has `spl_interaction_excerpts`, note key interaction classes described (not cross-compound interactions — those belong in compatibility).
+- If any compound has `spl_interaction_excerpts` or non-empty `interaction_evidence`, note key interaction classes or combination-risk signals described (not cross-compound pairing — that belongs in compatibility).
 - Note chronic or off-label exposure unknowns for longevity-oriented combinations when appropriate.
 - Do **not** mention evaluation units, tags, or pipeline mechanics.
 - Do **not** make prescribing recommendations or assess combination-specific interactions here.

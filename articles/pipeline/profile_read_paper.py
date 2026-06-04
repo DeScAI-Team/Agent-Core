@@ -39,8 +39,14 @@ PIPELINE = Path(__file__).resolve().parent
 ARTICLES = PIPELINE.parent
 REPO_ROOT = ARTICLES.parent
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
+import sys
+from pathlib import Path as _Path
+_ARTICLES = _Path(__file__).resolve().parents[1]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+from llm_env import LLM_API_KEY, LLM_BASE_URL  # noqa: E402
+VLLM_BASE_URL = LLM_BASE_URL
+VLLM_API_KEY = LLM_API_KEY
 DEFAULT_MODEL = os.environ.get(
     "DOCUMENT_PROFILE_MODEL",
     os.environ.get("VALIDATOR_MODEL", "/model"),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
@@ -12,8 +12,7 @@ class UploadStep:
     label: str
     doctype: str
     file_key: str
-    append_template: str | None = None
-    modified: bool = False
+    inject_evidence_audit: bool = False
 
 
 @dataclass
@@ -82,7 +81,7 @@ def _article_metadata_extra(_ctx: dict[str, Any], input_dir: str) -> dict[str, A
 
 
 def _dao_metadata_extra(_ctx: dict[str, Any], input_dir: str) -> dict[str, Any]:
-    return {"synthesis_dir": input_dir}
+    return {"review_dir": input_dir}
 
 
 def _compounds_metadata_extra(ctx: dict[str, Any], input_dir: str) -> dict[str, Any]:
@@ -108,19 +107,17 @@ RECIPES: dict[str, Recipe] = {
             UploadStep("evidence_audit", "Step 1/3: Upload evidence_audit.md", "evidence", "evidence"),
             UploadStep(
                 "review",
-                "Step 2/3: Upload review.json (with evidence link)",
+                "Step 2/3: Upload review.json",
                 "review",
                 "review",
-                append_template=" Full evidence audit is available at arweave.net/{evidence_txid}",
-                modified=True,
+                inject_evidence_audit=True,
             ),
             UploadStep(
                 "overview",
-                "Step 3/3: Upload overview.json (with review link)",
+                "Step 3/3: Upload overview.json",
                 "overview",
                 "overview",
-                append_template=" Full review available at descai.net/review/{review_txid}",
-                modified=True,
+                inject_evidence_audit=True,
             ),
         ],
     ),
@@ -129,6 +126,7 @@ RECIPES: dict[str, Recipe] = {
         file_map={
             "evidence": "evidence_audit.md",
             "review": "review.json",
+            "overview": "overview.json",
         },
         review_json_key="review",
         tag_builder=_proposal_tags,
@@ -136,25 +134,31 @@ RECIPES: dict[str, Recipe] = {
         steps=[
             UploadStep(
                 "evidence_audit",
-                "Step 1/2: Upload evidence_audit.md",
+                "Step 1/3: Upload evidence_audit.md",
                 "EvidenceAudit",
                 "evidence",
             ),
             UploadStep(
                 "review",
-                "Step 2/2: Upload review.json (with evidence link)",
+                "Step 2/3: Upload review.json",
                 "review",
                 "review",
-                append_template=" Evidence bundle available at arweave.net/{evidence_txid}",
-                modified=True,
+                inject_evidence_audit=True,
+            ),
+            UploadStep(
+                "overview",
+                "Step 3/3: Upload overview.json",
+                "overview",
+                "overview",
+                inject_evidence_audit=True,
             ),
         ],
     ),
     "dao": Recipe(
         name="dao",
         file_map={
-            "evidence": "dao_evidence_audit.md",
-            "review": "dao_review.json",
+            "evidence": "evidence_audit.md",
+            "review": "review.json",
             "overview": "overview.json",
         },
         review_json_key="review",
@@ -163,25 +167,23 @@ RECIPES: dict[str, Recipe] = {
         steps=[
             UploadStep(
                 "evidence_audit",
-                "Step 1/3: Upload dao_evidence_audit.md",
+                "Step 1/3: Upload evidence_audit.md",
                 "evidence",
                 "evidence",
             ),
             UploadStep(
                 "review",
-                "Step 2/3: Upload dao_review.json (with evidence link)",
+                "Step 2/3: Upload review.json",
                 "review",
                 "review",
-                append_template=" Find evidence audit at arweave.net/{evidence_txid}",
-                modified=True,
+                inject_evidence_audit=True,
             ),
             UploadStep(
                 "overview",
-                "Step 3/3: Upload overview.json (with review link)",
+                "Step 3/3: Upload overview.json",
                 "overview",
                 "overview",
-                append_template=" Find full review at descai.net/review/{review_txid}",
-                modified=True,
+                inject_evidence_audit=True,
             ),
         ],
     ),
@@ -190,6 +192,7 @@ RECIPES: dict[str, Recipe] = {
         file_map={
             "evidence": "evidence_audit.md",
             "review": "__review_json__",
+            "overview": "overview.json",
         },
         review_json_key="review",
         tag_builder=_compounds_tags,
@@ -197,17 +200,23 @@ RECIPES: dict[str, Recipe] = {
         steps=[
             UploadStep(
                 "evidence_audit",
-                "Step 1/2: Upload evidence_audit.md",
+                "Step 1/3: Upload evidence_audit.md",
                 "evidence",
                 "evidence",
             ),
             UploadStep(
                 "review",
-                "Step 2/2: Upload review (with evidence link)",
+                "Step 2/3: Upload review.json",
                 "review",
                 "review",
-                append_template=" You can find evidence audit at arweave.net/{evidence_txid}",
-                modified=True,
+                inject_evidence_audit=True,
+            ),
+            UploadStep(
+                "overview",
+                "Step 3/3: Upload overview.json",
+                "overview",
+                "overview",
+                inject_evidence_audit=True,
             ),
         ],
     ),

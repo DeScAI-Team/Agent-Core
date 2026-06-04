@@ -1,6 +1,6 @@
 """
 Claim classification enricher — reads validated claims JSONL, classifies each claim
-via vLLM (OpenAI-compatible chat.completions), appends claim_classification_* fields.
+via tagger LLM (OpenAI-compatible chat.completions), appends claim_classification_* fields.
 """
 
 from __future__ import annotations
@@ -8,23 +8,21 @@ from __future__ import annotations
 import argparse
 import functools
 import json
-import os
 import re
+import sys
 import time
 from pathlib import Path
 
-from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+_ARTICLES = Path(__file__).resolve().parents[1]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+
+from llm_env import TAGGER_API_KEY, TAGGER_BASE_URL, make_client, tagger_model  # noqa: E402
+
+REPO_ROOT = _ARTICLES
 PROMPT_PATH = REPO_ROOT / "prompts" / "claim_classification_prompt_v4 (1).md"
-
-load_dotenv(REPO_ROOT / ".env")
-
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-_DEFAULT_MODEL = os.environ.get("VALIDATOR_MODEL", "mixtral-8x7b-instruct")
-MODEL = os.environ.get("CLASSIFIER_MODEL", _DEFAULT_MODEL)
 
 MAX_RETRIES = 4
 MAX_CLASSIFIER_TOKENS = 128
@@ -126,7 +124,8 @@ def main() -> None:
     prompt_text = load_classifier_prompt_text()
     allowed = parse_tags_from_prompt_md(prompt_text)
 
-    client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
+    client = make_client(tagger=True)
+    model = tagger_model()
 
     input_path = args.input.resolve()
     output_path = args.output.resolve()
@@ -147,7 +146,7 @@ def main() -> None:
                 n += 1
                 if n % 25 == 0:
                     print(f"  [{n}] classified...")
-                raw = classify_claim_raw(client, MODEL, claim)
+                raw = classify_claim_raw(client, model, claim)
                 tags = parse_validate_truncate_tags(raw, allowed)
 
             enriched = {**record, **split_tags_to_classification_fields(tags)}

@@ -405,25 +405,15 @@ Add `--skip-llm` to skip review statement regeneration and keep the existing
 {
   "research_name": "...",
   "review_date": "...",
-  "composite_score": 0.48,
+  "composite_score": 48,
   "review_statement": "...",
   "categories": {
     "scientific_rigor": {
-      "score": 0.35,
-      "score_method": "evidence_grade_weighted",
-      "claim_count": 33,
+      "score": 35,
       "rationale": "..."
     },
     "originality": {
-      "score": 0.90,
-      "score_method": "literature_similarity",
-      "compared_works": 105,
-      "rationale": "..."
-    },
-    "team_credibility": {
-      "score": 0.40,
-      "score_method": "rubric_penalty",
-      "finding_count": 3,
+      "score": 90,
       "rationale": "..."
     }
   }
@@ -523,7 +513,7 @@ Steps 6–13 correspond to this folder's scripts:
 The same empirical steps (6–13) are run by `empirical-pipe.py` when driving the
 full pipeline from an input directory. **`empirical-pipe.py`** stores all
 intermediates under **`<research-folder>/steps/`** and publishes **`review.json`**,
-**`overview.json`**, and **`evidence_audit.md`** under **`<research-folder>/output/`**.
+**`overview.json`**, and **`evidence_audit.md`** under **`<research-folder>/review/`** (legacy standalone runs may use `output/`).
 The **`run_pipe2.py`** helper uses a **flat** layout in its output directory instead.
 
 ---
@@ -543,7 +533,7 @@ A typical run produces these files. Layout depends on the driver script:
 | `retrieve_compare_llm.json` | Claims enriched with evidence grades and citation analysis |
 | `prepped_evidence.json` | Claims with narrative sentences and grade distributions (scoring done by `score.py`) |
 | `pre_condensed_rationales.json` | Stage 2 rationales before condensation (debug artifact) |
-| `review.json` | Final structured review with unified scores, `composite_score`, rationales, score metadata (`score_method`, `claim_count`/`finding_count`/`compared_works`), and review statement |
+| `review.json` | Final structured review: integer `composite_score` and per-category scores (0–100, ceil), `rationale` only, `review_statement` |
 | `overview.json` | Plain-language companion to `review.json` (written by `score.py` when LLM overview is enabled) |
 | `originality_openalex_cache.json` | Cached OpenAlex search results (used by `originality_check.py`) |
 | `originality.json` | Full originality report: search terms, related works with similarity scores, originality score, and statement |

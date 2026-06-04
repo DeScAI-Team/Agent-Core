@@ -49,8 +49,8 @@ from originality_check import (  # noqa: E402
     VLLM_API_KEY as _VLLM_API_KEY,
 )
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
+VLLM_BASE_URL = _VLLM_BASE_URL
+VLLM_API_KEY = _VLLM_API_KEY
 
 
 def _load_prompt(filename: str) -> str:

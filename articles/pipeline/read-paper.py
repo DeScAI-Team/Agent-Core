@@ -1,39 +1,32 @@
 #!/usr/bin/env python3
 """
-PDF → raster pages → one vLLM call per page (Nanonets-OCR2-3B via OpenAI-compatible API).
+PDF → raster pages → one vision LLM call per page (Nanonets-OCR2-3B via OpenAI-compatible API).
 
   vllm serve nanonets/Nanonets-OCR2-3B
 
-Env: VLLM_BASE_URL, VLLM_API_KEY, READ_PAPER_MODEL (defaults match review.py + HF model id).
-Output: articles/data/<pdf_stem>/page_XXX.md and full.md
+Env: VISION_MODEL_URL, VISION_MODEL_API_KEY, READ_PAPER_MODEL (via articles/llm_env.py).
+Output: <out-root>/<pdf_stem>/ or --out-dir directly (page_*.md, full.md).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
 
-from openai import OpenAI
+_ARTICLES = Path(__file__).resolve().parents[1]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None  # type: ignore[misc, assignment]
+from llm_env import READ_PAPER_MODEL, VISION_API_KEY, VISION_BASE_URL, make_client  # noqa: E402
 
-from vision_client import PDF_OCR_PROMPT, rasterize_pdf_pages, vision_describe
+from vision_client import PDF_OCR_PROMPT, rasterize_pdf_pages, vision_describe  # noqa: E402
 
 PIPELINE = Path(__file__).resolve().parent
 ARTICLES = PIPELINE.parent
-REPO_ROOT = ARTICLES.parent
 DEFAULT_DATA = ARTICLES / "data"
-
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-DEFAULT_MODEL = os.environ.get("READ_PAPER_MODEL", "nanonets/Nanonets-OCR2-3B")
 
 
 def rasterize_pdf(pdf_path: Path, scale: float = 2.0) -> list:
@@ -42,7 +35,7 @@ def rasterize_pdf(pdf_path: Path, scale: float = 2.0) -> list:
 
 
 def read_page(
-    client: OpenAI,
+    client,
     model: str,
     pil_image,
     *,
@@ -66,28 +59,39 @@ def _safe_stem(stem: str) -> str:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="PDF → Nanonets OCR via local vLLM.")
+    p = argparse.ArgumentParser(description="PDF → vision OCR via OpenAI-compatible API.")
     p.add_argument("--pdf", type=Path, required=True)
-    p.add_argument("--out-root", type=Path, default=DEFAULT_DATA)
-    p.add_argument("--model", type=str, default=DEFAULT_MODEL)
-    p.add_argument("--base-url", type=str, default=VLLM_BASE_URL)
-    p.add_argument("--api-key", type=str, default=VLLM_API_KEY)
+    p.add_argument(
+        "--out-root",
+        type=Path,
+        default=DEFAULT_DATA,
+        help="Parent dir; writes <out-root>/<pdf_stem>/ unless --out-dir is set",
+    )
+    p.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Exact output directory (no extra <stem>/ subfolder)",
+    )
+    p.add_argument("--model", type=str, default=READ_PAPER_MODEL)
+    p.add_argument("--base-url", type=str, default=VISION_BASE_URL)
+    p.add_argument("--api-key", type=str, default=VISION_API_KEY)
     p.add_argument("--render-scale", type=float, default=2.0)
     p.add_argument("--max-tokens", type=int, default=15000)
     p.add_argument("--max-retries", type=int, default=4)
     args = p.parse_args()
-
-    if load_dotenv:
-        load_dotenv(REPO_ROOT / ".env")
 
     pdf = args.pdf.expanduser().resolve()
     if not pdf.is_file() or pdf.suffix.lower() != ".pdf":
         print(f"error: not a PDF file: {pdf}", file=sys.stderr)
         sys.exit(1)
 
-    out_dir = args.out_root.expanduser().resolve() / _safe_stem(pdf.stem)
+    if args.out_dir is not None:
+        out_dir = args.out_dir.expanduser().resolve()
+    else:
+        out_dir = args.out_root.expanduser().resolve() / _safe_stem(pdf.stem)
     out_dir.mkdir(parents=True, exist_ok=True)
-    client = OpenAI(base_url=args.base_url, api_key=args.api_key)
+    client = make_client(vision=True)
 
     pages = rasterize_pdf(pdf, args.render_scale)
     if not pages:

@@ -42,9 +42,15 @@ from openai import OpenAI
 _BASE = Path(__file__).resolve().parent
 PROMPTS_DIR = _BASE / "prompts"
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-MODEL = os.environ.get("VALIDATOR_MODEL", "/model")
+import sys
+from pathlib import Path as _Path
+_ARTICLES = _Path(__file__).resolve().parents[2]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+from llm_env import LLM_API_KEY, LLM_BASE_URL  # noqa: E402
+VLLM_BASE_URL = LLM_BASE_URL
+VLLM_API_KEY = LLM_API_KEY
+MODEL = os.environ.get("LLM_MODEL") or os.environ.get("VALIDATOR_MODEL", "/model")
 OPENALEX_EMAIL = os.environ.get("OPENALEX_EMAIL", "team@descai.org")
 
 OPENALEX_SLEEP = 1.0 / 8.0          # polite-pool rate limit

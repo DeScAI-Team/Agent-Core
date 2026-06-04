@@ -10,28 +10,104 @@ End-to-end pipeline for screening a compound's longevity research potential usin
 pip install -r requirements.txt
 ```
 
-`prepare.py`, `list.py`, and `group_by_stance.py` use **stdlib only**. `discover.py` requires `requests`. `tag.py` and `review.py` require `openai` (and optionally `python-dotenv`).
+`discover.py` requires `requests`. `tag-group-filter.py`, `topic_grouper.py`, `review.py`, and `overview.py` require `openai` (and optionally `python-dotenv` via `llm_env.py`).
 
 ---
 
 ## Pipeline at a glance
 
-Run the full chain with **`orchestrate.py`** (single compound) or **`pipeline/single/run_review.py --compound <name>`**:
+Run the full chain with **`pipeline/single/run_review.py --compound <name>`** (or `orchestrate.py` when wired to the same path):
 
 ```
-discover.py              →  report_<UTC>.json
-prepare.py               →  prepared_<stem>_agent.json
-list.py                  →  units.jsonl
-tag.py                   →  units_tagged.jsonl
-group_by_stance.py       →  grouped_by_stance.json
-openalex_risk_search.py  →  openalex_risk_context.json   (supplemental safety literature; step 5b)
-review.py                →  <Compound>-review.json
-evidence-doc.py          →  evidence_audit.md
+discover.py --incremental  →  material.json (+ delta-tag each round → longevity/risk JSONL)
+topic_grouper.py         →  longevity_groups.json, risk_groups.json
+review.py                →  review/review.json
+overview.py              →  review/overview.json (plain-language; same scores)
+evidence-doc.py          →  review/evidence_audit.md (non-LLM audit)
 ```
 
-`openalex_risk_search.py` supplements curated SPL/FAERS/caution excerpts for the risk LLM pass; it does not replace tagging or `aggregate_risk` scoring. Skip with `--skip-openalex-risk` on `run_review.py` or `orchestrate.py`.
+**Discover:** batched fetch with per-source caps; dedupe at collection; between rounds only **new** rows are LLM-tagged (`tag-group-filter --incremental`). Legacy one-shot: `discover.py --one-shot`.
+
+**Review LLM pattern:** one call per topic group (bulleted JSON summary), then three synthesis calls. Typical Rh2-scale runs: ~26 group calls + 3 synthesis calls after discover completes.
+
+All outputs live under **`reviews/compounds/<TICKER>/`**:
+
+```
+reviews/compounds/DOCS/
+  review/          review.json, overview.json, evidence_audit.md
+  steps/           all intermediate artifacts
+```
+
+Multi-compound tokens (e.g. OMIGU) use the same layout:
+
+```
+reviews/compounds/OMIGU/
+  steps/
+    Omipalisib/              per-compound pipeline outputs
+    Ginsenoside_Rh2/
+    Urolithin_A/
+    omipa-ginse-uroli-bundle.json   combination evidence (v3)
+  review/
+    review.json              combo review (4 LLM passes)
+    overview.json            plain-language combo review (same scores)
+    evidence_audit.md        non-LLM combination audit
+  steps/<Compound>/review/   per-compound review.json, overview.json, evidence_audit.md
+```
+
+### Multi-compound (`orchestrate.py` with ≥2 compounds)
+
+| Step | Script | Output |
+|------|--------|--------|
+| 1 (×N) | `run_review.py` | `steps/<Compound>/` artifacts + `steps/<Compound>/review/{review.json,overview.json,evidence_audit.md}` |
+| 2 | `interactions.py` | `steps/<slug>-bundle.json` — reads **only** kept review artifacts (see below) |
+| 3 | `review-multiple.py` | `review/review.json` — combo grounding, risk, compatibility, statement |
+| 4 | `overview.py` | `review/overview.json` — simplified text (skip with `--skip-overview`) |
+| 5 | `evidence-doc.py` | `review/evidence_audit.md` — combination audit (orchestrator only) |
+
+**Bundle inputs (per compound)** — same files `review.py` uses, not raw `material.json`:
+
+- `longevity.json`, `risk.json` (tag-group-filter exports)
+- `longevity_topic_summaries.json`, `risk_topic_summaries.json`
+- `review/review.json` (scores + rationales; or legacy `review.json` beside steps)
+
+**Full combo run:**
+
+```bash
+cd compounds
+python orchestrate.py --compounds Omipalisib "Ginsenoside Rh2" "Urolithin A" --skip-upload
+```
+
+**After updating one compound** (e.g. re-ran `run_review.py` for Rh2 only) — refresh bundle + combo review + audit without re-discovering all three:
+
+```bash
+python orchestrate.py \
+  --compounds Omipalisib "Ginsenoside Rh2" "Urolithin A" \
+  --skip-discover --skip-individual --skip-upload
+```
+
+**Bundle only** (no LLM):
+
+```bash
+python pipeline/multi/interactions.py \
+  --compounds Omipalisib "Ginsenoside Rh2" "Urolithin A" \
+  --data-root ../reviews/compounds/OMIGU/steps \
+  -o ../reviews/compounds/OMIGU/steps/omipa-ginse-uroli-bundle.json
+```
+
+**Evidence audit only** (requires bundle + `review/review.json`):
+
+```bash
+python pipeline/evidence-doc.py \
+  --combination-bundle ../reviews/compounds/OMIGU/steps/omipa-ginse-uroli-bundle.json \
+  --combo-review ../reviews/compounds/OMIGU/review/review.json \
+  -o ../reviews/compounds/OMIGU/review/evidence_audit.md
+```
+
+Compound names must match a row in `crawlers/output/pump.science/compound-tokens.json` (ticker resolved automatically).
 
 Each step is offline from the previous one — you can re-run any stage without re-fetching upstream data.
+
+**BioAssay-NLG (optional, for PubChem bioassay prose):** clone [BioAssay-NLG](https://github.com/DeScAI-Team/BioAssay-NLG) into `compounds/BioAssay-NLG/`. SIDs are resolved via PubChem `compound/cid/{cid}/sids/JSON` (no local database).
 
 ---
 
@@ -39,193 +115,96 @@ Each step is offline from the previous one — you can re-run any stage without 
 
 ### `discover.py` — fetch compound data from public APIs
 
-**Why it exists:** Consolidates regulatory, trial, pathway, and literature data from four public APIs into a single timestamped JSON artifact under `pump-science/<compound>/`. Having one canonical raw report per run means all downstream steps can be reproduced or re-prepared offline without repeated network calls.
+**Why it exists:** Consolidates regulatory, trial, pathway, literature, bioactivity, and bioassay data into one timestamped JSON artifact. PubChem synonym resolution fans out queries across sources so obscure names (e.g. herbal metabolites) match more often.
 
 **What it fetches:**
-- **OpenFDA** — FAERS adverse event terms + drug label (SPL) fields
-- **ClinicalTrials.gov v2** — slim study list (NCT id, phases, status, outcomes)
-- **KEGG REST** — drug IDs, linked pathway names/descriptions, longevity keyword flags
-- **Europe PMC** — up to 150 articles (50 per query) across `longevity`, `aging`, `lifespan` searches; deduplicated by pmid → pmcid → doi → id
+- **PubChem PUG REST** — CID + synonyms (`metadata.query_names`); bioassay summaries (top 8 AIDs, NLG prose via BioAssay-NLG + PubChem `cid/sids`)
+- **OpenFDA** — FAERS + labels queried per alias (`generic_name`, `substance_name`, `brand_name`)
+- **ClinicalTrials.gov v2** — merged studies across aliases
+- **KEGG REST** — drug IDs / pathways across aliases
+- **Europe PMC** — longevity, aging, lifespan, healthspan, senescence, and multi-synonym OR queries; deduped by pmid → pmcid → doi → id
+- **ChEMBL** — molecule match, mechanisms (targets), bioactivities
 
-All HTTP calls use a **10 s timeout**. Failures are recorded in `metadata.failures` and the corresponding section is `null` in the output; the file is always written.
+All HTTP calls use a **10 s timeout** by default (`DISCOVER_TIMEOUT` env to override). Failures land in `metadata.failures`; partial data is always written.
 
-**Label result filtering:** After fetching drug label results from OpenFDA, `discover.py` keeps only entries whose `openfda.generic_name` list contains the queried compound name as a case-insensitive substring. This prevents unrelated multi-ingredient products from being attributed to the queried compound when it has no FDA-approved label of its own. When results are dropped, `metadata.label_filter_dropped` records the count and `openfda.drug_labels` is `[]` (empty list) rather than `null` — so downstream code can distinguish a successful-but-empty query from a failed API call.
+**Label result filtering:** Labels kept when **any** query alias matches as substring in `openfda.generic_name`, `substance_name`, or `brand_name`.
 
-**CLI:**
+**CLI** (from `compounds/`, via `run_review.py` or directly):
 
 ```bash
-# From the pump-science directory
-python discover.py --compound metformin
-#   → pump-science/metformin/report_<YYYYMMDD_HHMMSSZ>.json
-
-python discover.py --compound "Doxycycline HCl"
-#   → pump-science/Doxycycline_HCl/report_<timestamp>.json
-
-# Pipe to stdout (skip file write)
-python discover.py --compound metformin --stdout
-
-# Explicit filename (relative = inside compound folder, not repo root)
-python discover.py --compound metformin --output my-run.json
+python pipeline/single/discover.py --compound metformin \
+  --compound-dir ../reviews/compounds/DOCS/steps --incremental \
+  --output ../reviews/compounds/DOCS/steps/material.json
 ```
 
-Output always lives under `pump-science/<sanitized_compound>/` unless you pass an absolute `--output` path or `--stdout`. Windows reserved names (CON, NUL, etc.) get a leading/trailing underscore.
+Legacy monolithic `report_*.json` under `steps/` is converted to `material.json` when using `--skip-discover`.
 
 ---
 
-### `prepare.py` — transform raw report into review-ready JSON
+### `run_review.py` — single-compound pipeline driver
 
-**Why it exists:** The raw discover report is dense and unstructured for LLM use. `prepare.py` reads it offline and produces a smaller, semantically organized artifact: literature ranked by relevance, trials sorted by result availability, SPL excerpts deduplicated by SHA-256, FAERS terms capped, and explicit `metadata.coverage` flags so a missing section is never confused with empty biology. It is **purely a local transform** — no HTTP calls.
-
-**Two output formats:**
-
-| Format | Suffix | Use when |
-|--------|--------|----------|
-| `review` (default) | `prepared_<stem>.json` | You want full research + risks blobs plus `agent_context` in one file for grep / archival. |
-| `agent` | `prepared_<stem>_agent.json` | You want a smaller file for LLM context — `agent_context` only, no duplicated SPL/article blobs. Pass this to `list.py`. |
-
-**CLI:**
+Runs discover (or tag-only) → topic grouper → review → overview. Resolves ticker via `token_lookup.py` and writes under `reviews/compounds/<TICKER>/`.
 
 ```bash
-cd pump-science
-
-# Default: processes every pump-science/*/report_*.json
-python prepare.py
-
-# Single file, agent format (most common for the pipeline)
-python prepare.py Doxycycline/report_20260419_062655Z.json --format agent
-
-# Glob patterns (quote on Windows to prevent shell expansion)
-python prepare.py "*/report_*.json" --format agent
-
-# Write to a separate output tree
-python prepare.py --output-root ./prepared
-
-# Single file to stdout
-python prepare.py Doxycycline/report_*.json --stdout
-```
-
-Exit code 1 if no JSON inputs matched or `--stdout` is used with multiple files.
-
----
-
-### `list.py` — flatten prepared JSON into per-unit JSONL
-
-**Why it exists:** Downstream LLM tagging works best with one small, self-contained JSON object per inference call. `list.py` expands `agent_context.evaluation_units` from a prepared file into UTF-8 JSONL — one line per unit — so `tag.py` can process each independently without loading the full prepared blob.
-
-Each output line has: `compound_name`, `unit_sequence` (index / total across the run), `unit_id`, `unit_type`, `provenance`, `payload`, and optionally `prepared_file` (basename).
-
-Use `--audit` when you need verbose columns: `$schema_hint`, full paths, `json_path_in_prepared_doc`, `report_timestamp`, etc. Use `--repeat-coverage` (only with `--audit`) to repeat `metadata.coverage` on every line.
-
-If `evaluation_units` is missing (older prepared JSON), `list.py` rebuilds it from the nested `agent_context.*` sections using `prepare._build_evaluation_units`.
-
-**CLI:**
-
-```bash
-cd pump-science
-
-# Slim JSONL (default)
-python list.py Doxycycline/prepared_report_20260419_062655Z_agent.json -o Doxycycline/units.jsonl
-
-# Multiple prepared files; unit_sequence.index is global across the batch
-python list.py metformin/prepared_*_agent.json doxycycline/prepared_*_agent.json -o all_units.jsonl
-
-# Stdout
-python list.py prepared_report_*_agent.json
-
-# Audit rows with payload truncation
-python list.py prepared_*_agent.json --audit --repeat-coverage --truncate-payload 6000 -o audit.jsonl
+python pipeline/single/run_review.py --compound "Ginsenoside Rh2"
+python pipeline/single/run_review.py --compound "Ginsenoside Rh2" --skip-discover --skip-overview
 ```
 
 ---
 
-### `tag.py` — assign section, stance, and risk tags via LLM
+### `tag-group-filter.py` — tag and filter material rows
 
-**Why it exists:** Each evaluation unit needs two categorical labels to route it through the review pipeline: what *kind* of evidence it is (`report_section`) and whether it *supports or cautions* longevity-oriented exploration (`decision_relevance`). A second pass adds a `risk_severity` ordinal so the review step can quantify harm signal without re-reading every unit. Splitting these into two prompt calls keeps each prompt focused and its output verifiable.
+Tags each `material.json` row with `longevity_relevance` and `risk_relevance`, applies rule overrides, and writes filtered JSONL:
 
-`tag.py` sends each JSONL line to a vLLM (or any OpenAI-compatible) endpoint **twice**: once for section/stance, once for risk severity. The same raw unit JSON is the user message for both rounds — tags from round 1 are not fed into round 2.
-
-**CLI:**
+- `longevity.json` — longevity-tagged rows that pass review filter (excludes oncology-only mechanism hits)
+- `risk.json` — human safety / interactions / literature tox; excludes in vitro assay cytotoxicity noise
 
 ```bash
-cd pump-science
-
-python tag.py Doxycycline/units.jsonl -o Doxycycline/units_tagged.jsonl
-
-# Section/stance only (skip risk round)
-python tag.py Doxycycline/units.jsonl -o out.jsonl --skip-risk
-
-# Read from stdin, write to stdout
-python tag.py - -o -
+python3 pipeline/single/tag-group-filter.py steps/material.json --out-dir steps
 ```
-
-Default input if omitted: `pump-science/Doxycycline/units.jsonl`.  
-Default output if `-o` omitted: `<input_stem>_tagged.jsonl` beside the input.
-
-**Environment variables:**
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `VLLM_BASE_URL` | `http://localhost:8000/v1` | API base URL |
-| `VLLM_API_KEY` | `none` | API key (often unused for local vLLM) |
-| `TAGGER_MODEL` | falls back to `CLASSIFIER_MODEL`, then `VALIDATOR_MODEL` | Model id for round 1 (and round 2 if `TAGGER_RISK_MODEL` is unset) |
-| `TAGGER_RISK_MODEL` | *(same as `TAGGER_MODEL`)* | Override model for risk round only |
-| `TAGGER_MAX_TOKENS` | `2048` | Completion budget (increase for long reasoning traces) |
-| `TAGGER_RISK_RETRIES` | `3` | Re-ask attempts when risk output fails allowlist parsing |
-| `TAGGER_SEED` | *(unset)* | Passed as `seed` when the server supports it |
-
-**vLLM note:** If your vLLM server loads a `generation_config.json` that overrides `temperature`, relaunch with `--generation-config vllm` so client parameters (`temperature=0`, `top_p=1`, `top_k=-1`) take effect.
 
 ---
 
-### `group_by_stance.py` — aggregate tagged units by stance
+### `topic_grouper.py` — group filtered rows by topic
 
-**Why it exists:** After tagging, `review.py` needs to know which units support exploration vs. raise caution, and how many. `group_by_stance.py` partitions rows by `decision_relevance` and computes a numeric `scientific_grounding` score so `review.py` can calibrate prose language without re-reading every unit.
-
-**CLI:**
+Dedupes, keyword-buckets, and TF-IDF-splits rows into capped topic groups (default max 12 units per group). **Always processes longevity and risk in one command:**
 
 ```bash
-cd pump-science
-
-python group_by_stance.py Doxycycline/units_tagged.jsonl
-# → Doxycycline/grouped_by_stance.json
-
-python group_by_stance.py metformin/units_tagged.jsonl -o metformin/grouped_by_stance.json
+python3 pipeline/single/topic_grouper.py steps/
+# → steps/longevity_groups.json, steps/risk_groups.json
 ```
 
-Default input if omitted: `pump-science/Doxycycline/units_tagged.jsonl`.  
-Default output: `<input_dir>/grouped_by_stance.json`.
-
-**`scores.scientific_grounding`:** `supports_exploration_count / (supports_exploration_count + raises_caution_count)`, rounded to two decimals. `null` if neither bucket has any rows. `risk_information`, `mixed_or_unclear`, `context_only`, and `unmapped` rows do not enter this ratio.
+Each group contains normalized `units` with `unit_id`, `citation`, `excerpt`, and relevance tags.
 
 ---
 
-### `review.py` — synthesize final review from grouped units
+### `review.py` — two-stage group review
 
-**Why it exists:** The three LLM passes in `review.py` mirror how a human reviewer would process the grouped evidence: first assess the scientific case, then assess the risk picture, then write a high-level synthesis that references the score and data coverage. Separating the passes prevents the risk paragraph from anchoring the scientific grounding paragraph (and vice versa), and gives the final synthesis a compact, structured context to work from.
+**Stage 1:** one LLM call per topic group → `longevity_topic_summaries.json` / `risk_topic_summaries.json`  
+**Stage 2:** three synthesis calls from topic bullets only → scientific grounding, risk, review statement
 
-`review.py` reads `grouped_by_stance.json` and runs **three sequential completions**:
-
-1. **Pass 1 — scientific grounding:** feeds `supports_exploration` members to `prompts/pump-science-scientific-grounding-evaluation.md`
-2. **Pass 2 — risk statement:** feeds `raises_caution` + `risk_information` members to `prompts/pump-science-risk-statement-evaluation.md`
-3. **Pass 3 — review statement:** feeds a compact bundle (Pass 1 & 2 text + `scientific_grounding_score` + tag counts + `metadata.coverage` from the nearest `prepared_report_*.json`) to `prompts/pump-science-review-statement-evaluation.md`
-
-Output: `<compound_dir>/<compound_name>-review.json` with `compound_name`, `review_date`, `review_statement`, and nested `categories.scientific_grounding` / `categories.risk_assessment` each containing `score` and `rationale`.
-
-**CLI:**
+Requires pre-built `*_groups.json` (from `topic_grouper.py`). Compound name comes from `material.json` or `--compound`.
 
 ```bash
-cd pump-science
-
-python review.py Doxycycline/grouped_by_stance.json
-# → Doxycycline/Doxycycline-review.json
-
-python review.py Doxycycline/grouped_by_stance.json -o Doxycycline/my-review.json
-
-# Override model
-python review.py Doxycycline/grouped_by_stance.json --model my-model-id
+python3 pipeline/single/review.py ../reviews/compounds/GING2/steps/longevity.json \
+  --risk ../reviews/compounds/GING2/steps/risk.json \
+  --longevity-groups ../reviews/compounds/GING2/steps/longevity_groups.json \
+  --risk-groups ../reviews/compounds/GING2/steps/risk_groups.json \
+  --compound "Ginsenoside Rh2" \
+  --run-root ../reviews/compounds/GING2
 ```
 
-Default input if omitted: `pump-science/Doxycycline/grouped_by_stance.json`.
+Output: `review/review.json` and (via `run_review.py`) `review/overview.json`.
+
+---
+
+### `overview.py` — plain-language review copy
+
+Rewrites `review_statement` and category rationales for a general audience; scores unchanged.
+
+```bash
+python pipeline/overview.py ../reviews/compounds/OMIGU/review/review.json
+```
 
 **Environment variables:**
 
@@ -233,27 +212,21 @@ Default input if omitted: `pump-science/Doxycycline/grouped_by_stance.json`.
 |----------|---------|---------|
 | `REVIEWER_MODEL` | falls back to `TAGGER_MODEL` → `CLASSIFIER_MODEL` → `VALIDATOR_MODEL` | Model for all three passes |
 | `REVIEWER_MAX_TOKENS` | `2048` | Completion budget per pass |
-| `VLLM_BASE_URL`, `VLLM_API_KEY` | same as `tag.py` | API endpoint |
+| `LLM_BASE_URL`, `LLM_API_KEY` | same as `tag.py` | API endpoint |
 
 ---
 
 ## End-to-end example
 
 ```bash
-cd pump-science
+cd compounds
 
-python discover.py --compound Doxycycline
-python prepare.py Doxycycline/report_<timestamp>.json --format agent
-python list.py Doxycycline/prepared_<stem>_agent.json -o Doxycycline/units.jsonl
-
-python tag.py Doxycycline/units.jsonl -o Doxycycline/units_tagged.jsonl
-python group_by_stance.py Doxycycline/units_tagged.jsonl
-
-python review.py Doxycycline/grouped_by_stance.json
-# → Doxycycline/Doxycycline-review.json
+python orchestrate.py --compounds Doxycycline --skip-upload
+# → reviews/compounds/DOCS/review/review.json
+# → reviews/compounds/DOCS/steps/…
 ```
 
-Replace `<timestamp>` and `<stem>` with the actual filenames produced by each step. Each step can be re-run independently without repeating upstream steps.
+Replace compound names with those listed in `crawlers/output/pump.science/compound-tokens.json`. Each step can be re-run independently without repeating upstream steps.
 
 ---
 
@@ -261,15 +234,18 @@ Replace `<timestamp>` and `<stem>` with the actual filenames produced by each st
 
 | File | Produced by | Contents |
 |------|-------------|---------|
-| `<compound>/report_<UTC>.json` | `discover.py` | Raw API payloads + metadata (includes `metadata.label_filter_dropped`) |
-| `<compound>/prepared_<stem>.json` | `prepare.py --format review` | Full research + risks + agent_context |
-| `<compound>/prepared_<stem>_agent.json` | `prepare.py --format agent` | agent_context only (smaller) |
-| `<compound>/units.jsonl` | `list.py` | One JSON object per evaluation unit |
-| `<compound>/units_tagged.jsonl` | `tag.py` | Units + report_section + decision_relevance + risk_severity |
-| `<compound>/grouped_by_stance.json` | `group_by_stance.py` | Units bucketed by stance + scientific_grounding score |
-| `<compound>/<Compound>-review.json` | `review.py` | Final review: grounding, risk, review_statement |
+| `steps/material.json` | `discover.py` | JSONL material rows (`source_type` + `content`) |
+| `steps/longevity.json`, `steps/risk.json` | `tag-group-filter.py` | Filtered tagged rows |
+| `steps/material_tagged.jsonl` | `tag-group-filter.py` | Full tagged audit trail |
+| `steps/longevity_groups.json`, `steps/risk_groups.json` | `topic_grouper.py` | Topic groups + normalized units |
+| `steps/longevity_topic_summaries.json`, `steps/risk_topic_summaries.json` | `review.py` stage 1 | Per-group bullet summaries |
+| `review/review.json` | `review.py` stage 2 | Final review |
+| `review/overview.json` | `overview.py` | Plain-language review |
+| `review/evidence_audit.md` | `evidence-doc.py` | Non-LLM audit (single via `run_review.py`; combo via orchestrator) |
+| `steps/<slug>-bundle.json` | `interactions.py` | Combination evidence bundle (v3, review-pipeline artifacts only) |
+| `steps/<Compound>/review/review.json` | `run_review.py` (multi) | Per-compound review embedded in bundle |
 
-`report_*.json` and `prepared_*.json` files are listed in `.gitignore` and are not committed.
+All paths are relative to `reviews/compounds/<TICKER>/`.
 
 ---
 

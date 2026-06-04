@@ -51,7 +51,27 @@ METADATA_FILENAMES = frozenset({
     "manifest.json",
     "dataroom.json",
     "profiles-index.json",
+    "links.json",
+    "crawl-manifest.json",
+    "crawl-extracted-links.json",
+    "nitter-manifest.json",
 })
+
+
+def _json_in_metadata(ipnft_dir: Path, name: str) -> Path:
+    meta = ipnft_dir / "metadata" / name
+    if meta.is_file():
+        return meta
+    root = ipnft_dir / name
+    return root if root.is_file() else meta
+
+
+def _local_content_path(ipnft_dir: Path, filename: str) -> Path:
+    for base in (ipnft_dir / "output", ipnft_dir / "metadata", ipnft_dir):
+        p = base / filename
+        if p.is_file():
+            return p
+    return ipnft_dir / "output" / filename
 
 
 def _load_json(path: Path) -> Any:
@@ -101,8 +121,8 @@ def classify_route(filename: str, content_type: str = "") -> RouteKind:
 
 def inventory_files(ipnft_dir: Path) -> list[dict[str, Any]]:
     """Return processable file entries from manifest + dataroom metadata."""
-    manifest = _load_json(ipnft_dir / "manifest.json") or []
-    dataroom = _load_json(ipnft_dir / "dataroom.json") or {}
+    manifest = _load_json(_json_in_metadata(ipnft_dir, "manifest.json")) or []
+    dataroom = _load_json(_json_in_metadata(ipnft_dir, "dataroom.json")) or {}
     dataroom_files = dataroom.get("files", []) if isinstance(dataroom, dict) else []
 
     dataroom_by_path: dict[str, dict] = {}
@@ -126,7 +146,7 @@ def inventory_files(ipnft_dir: Path) -> list[dict[str, Any]]:
         entry_path = entry.get("path", "")
         dr_entry = dataroom_by_path.get(entry_path, {})
         content_type = dr_entry.get("contentType", "")
-        local_path = ipnft_dir / filename
+        local_path = _local_content_path(ipnft_dir, filename)
 
         if not local_path.is_file():
             continue

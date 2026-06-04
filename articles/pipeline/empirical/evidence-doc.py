@@ -150,11 +150,15 @@ def _build_provenance_block(
     lines.append("")
     gen_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     git_rev = _git_revision(cwd) or _git_revision(output_path.parent)
-    model = os.environ.get("VALIDATOR_MODEL", "").strip() or "(unset)"
+    model = (
+        os.environ.get("LLM_MODEL", "").strip()
+        or os.environ.get("VALIDATOR_MODEL", "").strip()
+        or "(unset)"
+    )
 
     lines.append(f"- **Generated (UTC):** {gen_ts}")
     lines.append(f"- **Generator:** `evidence-doc.py` v{GENERATOR_VERSION} (no LLM)")
-    lines.append(f"- **VALIDATOR_MODEL:** `{model}` *(models used by upstream retrieve_compare / review / score steps)*")
+    lines.append(f"- **LLM_MODEL / VALIDATOR_MODEL:** `{model}` *(upstream retrieve_compare / review / score)*")
     lines.append(f"- **Git revision:** `{git_rev}` *(repository containing the run, best-effort)*" if git_rev else "- **Git revision:** *(unavailable — not a git checkout or git not on PATH)*")
     lines.append(f"- **Retrieve source file:** `{retrieve_path.name}`")
 

@@ -46,9 +46,15 @@ from retrieve_compare import (  # noqa: E402
     _unreferenced_summary,
 )
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-MODEL = os.environ.get("VALIDATOR_MODEL", "/model")
+import sys
+from pathlib import Path as _Path
+_ARTICLES = _Path(__file__).resolve().parents[2]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+from llm_env import LLM_API_KEY, LLM_BASE_URL  # noqa: E402
+VLLM_BASE_URL = LLM_BASE_URL
+VLLM_API_KEY = LLM_API_KEY
+MODEL = os.environ.get("LLM_MODEL") or os.environ.get("VALIDATOR_MODEL", "/model")
 
 
 EVIDENCE_AUDITOR_SYSTEM_THEORETICAL = """You are an evidence auditor for theoretical, review, and narrative papers. Given a claim from a paper that synthesizes existing literature or argues a thesis, and the abstracts of its cited references, determine whether the cited evidence actually supports the specific argumentative claim, synthesis, or interpretation as stated.

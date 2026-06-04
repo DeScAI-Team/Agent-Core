@@ -24,6 +24,10 @@ from typing import Any
 _BASE = Path(__file__).resolve().parent
 _MAPPINGS = _BASE / "proposal_mappings.json"
 
+if str(_BASE) not in sys.path:
+    sys.path.insert(0, str(_BASE))
+from run_layout import resolve_proposal_artifacts  # noqa: E402
+
 GENERATOR_VERSION = "1.0"
 
 
@@ -336,11 +340,14 @@ def main() -> None:
     args = parser.parse_args()
 
     directory = (args.directory or Path.cwd()).expanduser().resolve()
+    artifacts = resolve_proposal_artifacts(directory)
 
-    review_path = directory / "review.json"
-    screener_path = directory / "screener_findings.json"
-    originality_path = directory / "originality.json"
-    out_path = (args.output or directory / "evidence_audit.md").expanduser().resolve()
+    review_path = artifacts["review_path"]
+    screener_path = artifacts["screener_path"]
+    originality_path = artifacts["originality_path"]
+    out_path = (
+        args.output or artifacts["audit_out_path"]
+    ).expanduser().resolve()
 
     if not review_path.is_file():
         print(f"error: missing {review_path}", file=sys.stderr)

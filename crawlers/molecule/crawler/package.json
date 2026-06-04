@@ -11,7 +11,10 @@
     "profile": "tsx src/cli.ts profile",
     "profiles": "tsx src/cli.ts profiles",
     "orchestrate-profiles": "tsx src/cli.ts orchestrate-profiles",
-    "data-bundle": "tsx src/cli.ts data-bundle"
+    "data-bundle": "tsx src/cli.ts data-bundle",
+    "aggregate-links": "tsx src/cli.ts aggregate-links",
+    "crawl-links": "tsx src/cli.ts crawl-links",
+    "crawl-nitter": "tsx src/cli.ts crawl-nitter"
   },
   "packageManager": "pnpm@10.29.2",
   "devDependencies": {

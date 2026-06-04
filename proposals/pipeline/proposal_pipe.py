@@ -50,13 +50,29 @@ from originality_check import (  # noqa: E402
     OPENALEX_SLEEP,
 )
 
+_PROPOSALS = _BASE.parent
+if str(_PROPOSALS) not in sys.path:
+    sys.path.insert(0, str(_PROPOSALS))
+from llm_env import make_client, review_model, tagger_model  # noqa: E402
+
+# Proposals run_layout must win over articles/pipeline/run_layout.py on sys.path.
+if str(_BASE) not in sys.path:
+    sys.path.insert(0, str(_BASE))
+from run_layout import (  # noqa: E402
+    review_dir_for_run,
+    resolve_proposal_artifacts,
+    steps_dir_for_run,
+)
+
+_ARTICLES_PIPELINE = _REPO_ROOT / "articles" / "pipeline"
+if str(_ARTICLES_PIPELINE) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES_PIPELINE))
+from publish_review import publish_categories, publish_composite  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-MODEL = os.environ.get("VALIDATOR_MODEL", "/model")
 OPENALEX_EMAIL = os.environ.get("OPENALEX_EMAIL", "team@descai.org")
 
 WINDOW_TOKEN_TARGET = 1500
@@ -79,12 +95,18 @@ EXCLUDED_DIMENSIONS = frozenset({"cross_cutting"})
 _FENCE_BLOCK = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.I)
 
 
-def _llm_call(client: OpenAI, system_prompt: str, user_content: str, max_tokens: int) -> str:
+def _llm_call(
+    client: OpenAI,
+    system_prompt: str,
+    user_content: str,
+    max_tokens: int,
+    model: str,
+) -> str:
     """Local LLM call that preserves JSON output intact (no prose truncation)."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=MODEL,
+                model=model,
                 max_tokens=max_tokens,
                 temperature=0,
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
@@ -153,11 +175,15 @@ def _parse_json_object(raw: str) -> dict[str, Any] | None:
 
 
 def _llm_json_call(
-    client: OpenAI, system_prompt: str, user_content: str, max_tokens: int,
+    client: OpenAI,
+    system_prompt: str,
+    user_content: str,
+    max_tokens: int,
+    model: str,
     retries: int = 2,
 ) -> dict[str, Any] | None:
     for attempt in range(retries + 1):
-        raw = _llm_call(client, system_prompt, user_content, max_tokens)
+        raw = _llm_call(client, system_prompt, user_content, max_tokens, model)
         result = _parse_json_object(raw)
         if result is not None:
             return result
@@ -306,6 +332,7 @@ def screen_windows(
     mappings: dict,
     system_prompt: str,
     client: OpenAI,
+    model: str,
     stderr: Any,
 ) -> list[dict[str, Any]]:
     checklist = _build_dimension_checklist(mappings)
@@ -341,7 +368,9 @@ def screen_windows(
             user_parts[1] = f"--- PROPOSAL TEXT ---\n{trimmed}\n"
             user_content = "\n".join(user_parts)
 
-        parsed = _llm_json_call(client, system_prompt, user_content, SCREENER_MAX_TOKENS)
+        parsed = _llm_json_call(
+            client, system_prompt, user_content, SCREENER_MAX_TOKENS, model,
+        )
         if not parsed:
             print(f"    Window {idx + 1}: no parseable JSON returned", file=stderr)
             continue
@@ -429,6 +458,7 @@ def write_category_rationales(
     mappings: dict,
     writer_prompt: str,
     client: OpenAI,
+    model: str,
     stderr: Any,
 ) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
@@ -453,7 +483,9 @@ def write_category_rationales(
         ]
         user_content = "\n".join(p for p in user_parts if p)
 
-        parsed = _llm_json_call(client, writer_prompt, user_content, CATEGORY_WRITER_MAX_TOKENS)
+        parsed = _llm_json_call(
+            client, writer_prompt, user_content, CATEGORY_WRITER_MAX_TOKENS, model,
+        )
         if not parsed:
             print(f"    {label}: LLM returned no parseable JSON", file=stderr)
             continue
@@ -465,7 +497,6 @@ def write_category_rationales(
 
         results[dim_key] = {
             "rationale": rationale,
-            "finding_count": len(findings),
             "_findings": findings,
         }
 
@@ -498,7 +529,7 @@ def score_rubric_dimension(
 def run_originality(
     fulltext: str,
     abstract: str,
-    output_dir: Path,
+    steps_dir: Path,
     client: OpenAI,
     stderr: Any,
 ) -> dict[str, Any]:
@@ -531,7 +562,7 @@ def run_originality(
     if not search_terms:
         return {"score": 0.5, "rationale": "Could not generate search terms for originality comparison."}
 
-    cache_path = output_dir / "openalex_search_cache.json"
+    cache_path = steps_dir / "openalex_search_cache.json"
     related_works, _ = fetch_related_works(
         search_terms, cache_path, OPENALEX_EMAIL, MAX_RESULTS_PER_TERM, stderr,
     )
@@ -554,7 +585,7 @@ def run_originality(
         "related_works_count": len(scored_works),
         "related_works": scored_works,
     }
-    orig_path = output_dir / "originality.json"
+    orig_path = steps_dir / "originality.json"
     orig_path.write_text(
         json.dumps(originality_data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -590,6 +621,7 @@ def assess_funding_realism(
     funding_snapshot: dict[str, Any],
     screener_findings: list[dict[str, Any]],
     client: OpenAI,
+    model: str,
     stderr: Any,
 ) -> dict[str, Any]:
     print("\n=== Stage 4: Funding Realism ===", file=stderr)
@@ -630,7 +662,9 @@ def assess_funding_realism(
         user_parts.append(f"\nRELEVANT SCREENER OBSERVATIONS:\n{scope_summary}")
 
     user_content = "\n".join(user_parts)
-    parsed = _llm_json_call(client, funding_prompt, user_content, FUNDING_MAX_TOKENS)
+    parsed = _llm_json_call(
+        client, funding_prompt, user_content, FUNDING_MAX_TOKENS, model,
+    )
 
     snap_summary = (
         f"Funding snapshot: ${funding_snapshot['goal_amount']:,.0f} requested, "
@@ -646,7 +680,9 @@ def assess_funding_realism(
 
     if not parsed:
         print("  Funding realism: LLM returned no parseable JSON — retrying with raw prompt", file=stderr)
-        raw_retry = _llm_call(client, funding_prompt, user_content, FUNDING_MAX_TOKENS)
+        raw_retry = _llm_call(
+            client, funding_prompt, user_content, FUNDING_MAX_TOKENS, model,
+        )
         if raw_retry and len(raw_retry.strip()) > 50:
             rationale = snap_summary + " " + raw_retry.strip()
             print(f"  Funding realism: used raw text fallback", file=stderr)
@@ -708,7 +744,10 @@ def compute_composite(
 
 
 def generate_review_statement(
-    review_obj: dict, statement_prompt: str, client: OpenAI,
+    review_obj: dict,
+    statement_prompt: str,
+    client: OpenAI,
+    model: str,
 ) -> str:
     context = json.dumps(
         {
@@ -722,7 +761,63 @@ def generate_review_statement(
         indent=2,
     )
     print("  Generating top-level review statement ...", file=sys.stderr)
-    return _llm_call(client, statement_prompt, context, STATEMENT_MAX_TOKENS)
+    return _llm_call(client, statement_prompt, context, STATEMENT_MAX_TOKENS, model)
+
+
+OVERVIEW_MAX_TOKENS = 512
+
+
+def generate_overview(
+    review_obj: dict[str, Any],
+    overview_prompt: str,
+    client: OpenAI,
+    model: str,
+) -> dict[str, Any]:
+    """Layperson-readable copy of the proposal review."""
+    overview_categories: dict[str, Any] = {}
+
+    for dim_key, cat_data in review_obj.get("categories", {}).items():
+        rationale = cat_data.get("rationale", "")
+        if not rationale:
+            continue
+
+        dim_label = dim_key.replace("_", " ").title()
+        user_content = (
+            f"Dimension: {dim_label}\n\n"
+            f"Technical rationale:\n{rationale}"
+        )
+        print(f"  [{dim_label}] simplifying rationale ...", file=sys.stderr)
+        simplified = _llm_call(
+            client,
+            overview_prompt,
+            user_content,
+            OVERVIEW_MAX_TOKENS,
+            model,
+        )
+        overview_categories[dim_key] = {
+            "score": cat_data.get("score"),
+            "rationale": simplified,
+        }
+
+    overview_statement = review_obj.get("review_statement", "")
+    if overview_statement:
+        print("  [Review Statement] simplifying ...", file=sys.stderr)
+        overview_statement = _llm_call(
+            client,
+            overview_prompt,
+            f"Dimension: Overall Review Statement\n\n"
+            f"Technical rationale:\n{overview_statement}",
+            OVERVIEW_MAX_TOKENS,
+            model,
+        )
+
+    return {
+        "research_name": review_obj.get("research_name", ""),
+        "review_date": review_obj.get("review_date", ""),
+        "composite_score": review_obj.get("composite_score", 0),
+        "review_statement": overview_statement,
+        "categories": overview_categories,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -754,10 +849,6 @@ def main() -> None:
         "--skip-openalex", action="store_true",
         help="Skip OpenAlex search (use cached results if available)",
     )
-    parser.add_argument(
-        "--skip-upload", action="store_true",
-        help="Skip Arweave upload after review generation",
-    )
     args = parser.parse_args()
 
     stderr = sys.stderr
@@ -777,14 +868,19 @@ def main() -> None:
         print("  ERROR: No fulltext found in proposal JSON", file=stderr)
         sys.exit(1)
 
-    output_dir = args.output_dir
-    if not output_dir:
-        output_dir = _BASE.parent / "data" / str(proposal_id)
-    output_dir = output_dir.expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = args.output_dir
+    if not run_dir:
+        run_dir = _BASE.parent / "data" / str(proposal_id)
+    run_dir = run_dir.expanduser().resolve()
+    steps_dir = steps_dir_for_run(run_dir)
+    review_dir = review_dir_for_run(run_dir)
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    review_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"  Title: {title}", file=stderr)
-    print(f"  Output: {output_dir}", file=stderr)
+    print(f"  Run directory: {run_dir}", file=stderr)
+    print(f"  Steps: {steps_dir}", file=stderr)
+    print(f"  Review: {review_dir}", file=stderr)
     print(f"  Fulltext length: {len(fulltext)} chars", file=stderr)
 
     # ------------------------------------------------------------------
@@ -804,7 +900,7 @@ def main() -> None:
                 for w in windows
             ],
         }
-        out_path = output_dir / "debug_windows.json"
+        out_path = steps_dir / "debug_windows.json"
         out_path.write_text(
             json.dumps(debug_out, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -812,14 +908,21 @@ def main() -> None:
         print(f"\n  Debug output: {out_path}", file=stderr)
         return
 
-    client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
+    tagger_client = make_client(tagger=True)
+    review_client = make_client(tagger=False)
+    tagger_m = tagger_model()
+    review_m = review_model()
+    print(f"  Tagger model: {tagger_m}", file=stderr)
+    print(f"  Review model: {review_m}", file=stderr)
 
     # ------------------------------------------------------------------
     # Stage 2 — Sliding-Window Screener
     # ------------------------------------------------------------------
     print("\n=== Stage 2: Sliding-Window Screener ===", file=stderr)
     screener_prompt = _load_prompt("screener_system_prompt.md")
-    all_findings = screen_windows(windows, mappings, screener_prompt, client, stderr)
+    all_findings = screen_windows(
+        windows, mappings, screener_prompt, tagger_client, tagger_m, stderr,
+    )
     print(f"  Total raw findings: {len(all_findings)}", file=stderr)
 
     print("\n  Deduplicating ...", file=stderr)
@@ -827,7 +930,7 @@ def main() -> None:
 
     writer_prompt = _load_prompt("category_writer_prompt.md")
     writer_results = write_category_rationales(
-        grouped, mappings, writer_prompt, client, stderr,
+        grouped, mappings, writer_prompt, review_client, review_m, stderr,
     )
 
     # Build categories from screener results
@@ -872,7 +975,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     if not args.skip_openalex:
         originality_result = run_originality(
-            fulltext, abstract, output_dir, client, stderr,
+            fulltext, abstract, steps_dir, review_client, stderr,
         )
         categories["originality"] = {
             "score": originality_result.get("score", 0.5),
@@ -887,7 +990,13 @@ def main() -> None:
     funding_snapshot = compute_funding_snapshot(proposal)
     if funding_snapshot:
         funding_result = assess_funding_realism(
-            proposal, fulltext, funding_snapshot, all_findings, client, stderr,
+            proposal,
+            fulltext,
+            funding_snapshot,
+            all_findings,
+            review_client,
+            review_m,
+            stderr,
         )
         categories["funding_realism"] = {
             "score": funding_result.get("score", 0.5),
@@ -901,33 +1010,23 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("\n=== Stage 5: Score + Output ===", file=stderr)
 
-    # Convert all scores to 0-100
-    for cat in categories.values():
-        raw = cat.get("score")
-        if raw is not None:
-            cat["score"] = round(raw * 100)
-
-    composite_raw = compute_composite(
-        {k: {"score": v["score"] / 100.0} for k, v in categories.items() if v.get("score") is not None},
-        dimension_weights,
-    )
-    composite = round(composite_raw * 100)
+    published_categories = publish_categories(categories)
+    composite = publish_composite(categories, dimension_weights, compute_composite)
 
     review_obj: dict[str, Any] = {
         "research_name": title,
         "review_date": date.today().strftime("%B %d, %Y"),
         "composite_score": composite,
         "review_statement": "",
-        "categories": categories,
+        "categories": published_categories,
     }
 
     statement_prompt = _load_prompt("review_statement_prompt.md")
     review_obj["review_statement"] = generate_review_statement(
-        review_obj, statement_prompt, client,
+        review_obj, statement_prompt, review_client, review_m,
     )
 
-    # Write output
-    out_path = output_dir / "review.json"
+    out_path = review_dir / "review.json"
     out_path.write_text(
         json.dumps(review_obj, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -935,7 +1034,7 @@ def main() -> None:
     print(f"\n  Review written to {out_path}", file=stderr)
 
     # Write screener diagnostic
-    diag_path = output_dir / "screener_findings.json"
+    diag_path = steps_dir / "screener_findings.json"
     diag = {
         "proposal_id": proposal_id,
         "title": title,
@@ -957,12 +1056,13 @@ def main() -> None:
     print("\n=== Evidence Audit Trail ===", file=stderr)
     from evidence_doc import build_evidence_doc  # noqa: E402
     screener_data = json.loads(diag_path.read_text(encoding="utf-8"))
-    originality_path = output_dir / "originality.json"
+    originality_path = steps_dir / "originality.json"
     originality_data = (
         json.loads(originality_path.read_text(encoding="utf-8"))
         if originality_path.is_file()
         else None
     )
+    audit_path = review_dir / "evidence_audit.md"
     audit_text = build_evidence_doc(
         review_obj,
         screener_data,
@@ -970,23 +1070,22 @@ def main() -> None:
         review_path=out_path,
         screener_path=diag_path,
         originality_path=originality_path if originality_path.is_file() else None,
-        output_path=output_dir / "evidence_audit.md",
+        output_path=audit_path,
     )
-    audit_path = output_dir / "evidence_audit.md"
     audit_path.write_text(audit_text, encoding="utf-8")
     print(f"  Evidence audit: {audit_path}", file=stderr)
 
-    # Upload to Arweave
-    if not args.skip_upload:
-        sys.path.insert(0, str(_BASE.parent))
-        from uploader import run_upload_sequence  # noqa: E402
-
-        print("\n=== Upload ===", file=stderr)
-        upload_result = run_upload_sequence(output_dir=output_dir)
-        if upload_result.get("success"):
-            print("  Upload complete.", file=stderr)
-        else:
-            print(f"  Upload failed: {upload_result.get('error', 'unknown')}", file=stderr)
+    print("\n=== Stage 6: Overview ===", file=stderr)
+    overview_prompt = _load_prompt("overview_rationale_prompt.md")
+    overview_obj = generate_overview(
+        review_obj, overview_prompt, review_client, review_m,
+    )
+    overview_path = review_dir / "overview.json"
+    overview_path.write_text(
+        json.dumps(overview_obj, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    print(f"  Overview written to {overview_path}", file=stderr)
 
     print(f"\n  PIPELINE COMPLETE — composite score: {composite}/100", file=stderr)
 

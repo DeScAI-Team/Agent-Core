@@ -11,6 +11,9 @@ The user sends a JSON object with:
   - `spl_available` — whether an FDA drug label exists for this compound
   - `spl_interaction_excerpts` — list of drug-drug interaction text excerpts from the FDA label (may be empty)
   - `mechanism_snippets` — short excerpts from literature units describing the compound's primary mechanism of action (may be empty)
+  - `interaction_evidence` — snippets from discover rows tagged `interaction_or_combination_risk` (co-administration, CYP, transporter, combination therapy; may be empty)
+- `ticker` — pump.science token ticker when available (may be null)
+- `intervention` — official intervention string from compound-tokens.json (may be null)
 - `cross_reference` — object containing:
   - `shared_pathways` — list of KEGG pathways shared by two or more compounds in the set
   - `explicit_mentions` — list of objects `{source_compound, target_compound, text}` where `text` is a literature excerpt that directly mentions the target compound's name in the source compound's mechanism/interaction data

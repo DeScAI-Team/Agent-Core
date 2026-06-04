@@ -40,8 +40,8 @@ from originality_check import (  # noqa: E402
     OPENALEX_EMAIL,
 )
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", _VLLM_BASE_URL)
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", _VLLM_API_KEY)
+VLLM_BASE_URL = _VLLM_BASE_URL
+VLLM_API_KEY = _VLLM_API_KEY
 
 
 def _load_prompt(filename: str) -> str:

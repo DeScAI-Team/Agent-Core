@@ -1,52 +1,34 @@
 #!/usr/bin/env python3
-"""Run the full pump-science review pipeline for a single compound.
+"""Run the compound material -> filtered evidence -> review pipeline.
 
-Steps (artifacts under ``compounds/data/<compound>/`` unless noted):
-  1. discover.py   → report_<UTC>.json
-  2. prepare.py    → prepared_report_<stem>_agent.json
-  3. list.py       → units.jsonl
-  4. tag.py        → units_tagged.jsonl
-  5. group_by_stance.py → grouped_by_stance.json
-  5b. openalex_risk_search.py → openalex_risk_context.json (supplemental; skip with ``--skip-openalex-risk``)
-  6. review.py     → ``*-review.json`` (default: ``<repo>/reviews/compounds/<Compound>/``; override with ``--review-output``)
-  7. evidence-doc.py → ``evidence_audit.md`` in compound data dir (skipped with ``--skip-evidence-audit``)
+Artifacts under ``reviews/compounds/<TICKER>/steps/`` (intermediates) and
+``reviews/compounds/<TICKER>/review/`` (published review + evidence).
 
-Usage:
-  python run_review.py --compound Doxycycline
-  python run_review.py --compound Metformin --model my-model-id
-  python run_review.py --compound Doxycycline --skip-risk
-  python run_review.py --compound Doxycycline --skip-discover
-  python run_review.py --compound Omipalisib --skip-evidence-audit --review-output path/to/Omipalisib-review.json
+Steps:
+  1. discover.py (incremental) → material.json + delta-tag → longevity.json / risk.json
+  2. topic_grouper.py → longevity_groups.json + risk_groups.json
+  3. review.py     → review.json (default: ``review/review.json`` under run root)
+  4. overview.py   → overview.json (plain-language copy of review text; same scores)
+  5. evidence-doc.py → evidence_audit.md (non-LLM audit beside review)
+
+With --skip-discover, step 1 is tag-group-filter only (no incremental discover).
 """
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 _PUMP_SCIENCE_DIR = Path(__file__).resolve().parent
-_DATA_DIR = _PUMP_SCIENCE_DIR.parent.parent / "data"
+_COMPOUNDS_DIR = _PUMP_SCIENCE_DIR.parent.parent
 
-_WIN_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
-    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-}
-
-
-def _safe_dir_name(compound: str) -> str:
-    """Identical sanitization logic to discover.py:safe_compound_dir."""
-    safe = re.sub(r"[^\w\-.]+", "_", compound, flags=re.UNICODE).strip("._- ")[:80] or "compound"
-    if safe.upper() in _WIN_RESERVED:
-        safe = f"_{safe}_"
-    return safe
+if str(_COMPOUNDS_DIR) not in sys.path:
+    sys.path.insert(0, str(_COMPOUNDS_DIR))
+from token_lookup import bootstrap_run_dirs, resolve_ticker  # noqa: E402
 
 
 def _run(label: str, cmd: list[str | Path]) -> None:
-    """Run a subprocess step; exit immediately on failure."""
     str_cmd = [str(c) for c in cmd]
     print(f"\n[{label}] {' '.join(str_cmd)}", flush=True)
     result = subprocess.run(str_cmd)
@@ -57,162 +39,129 @@ def _run(label: str, cmd: list[str | Path]) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Run the full pump-science review pipeline for a compound.",
+        description="Run the material JSONL review pipeline for a compound.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  python run_review.py --compound Doxycycline\n"
-            "  python run_review.py --compound Metformin --model my-model-id\n"
-            "  python run_review.py --compound Doxycycline --skip-risk\n"
-            "  python run_review.py --compound Doxycycline --skip-discover\n"
-            "  python run_review.py --compound Omipalisib --skip-openalex-risk\n"
-        ),
     )
     ap.add_argument("--compound", required=True, help="Compound name to review.")
+    ap.add_argument("--run-root", type=Path, default=None, metavar="DIR")
     ap.add_argument(
-        "--model",
-        default=None,
-        metavar="NAME",
-        help="Override LLM model id forwarded to tag.py and review.py (--model flag).",
-    )
-    ap.add_argument(
-        "--skip-risk",
-        action="store_true",
-        help="Pass --skip-risk to tag.py (section/stance tagging only; skip risk severity round).",
-    )
-    ap.add_argument(
-        "--skip-discover",
-        action="store_true",
-        help=(
-            "Skip step 1 (discover). Picks the most recently modified report_*.json "
-            "in the compound data directory."
-        ),
-    )
-    ap.add_argument(
-        "--skip-openalex-risk",
-        action="store_true",
-        help="Skip step 5b (openalex_risk_search.py supplemental literature safety search).",
-    )
-    ap.add_argument(
-        "--skip-evidence-audit",
-        action="store_true",
-        help="Skip step 7 (evidence-doc.py). Use when a parent orchestrator runs audits at the end.",
-    )
-    ap.add_argument(
-        "--review-output",
+        "--steps-dir",
+        "--compound-dir",
         type=Path,
         default=None,
-        metavar="PATH",
-        help="Forward to review.py as ``-o`` (custom *-review.json path).",
+        metavar="DIR",
+        help="Directory with material.json and step outputs (default: reviews/compounds/<ticker>/steps).",
     )
+    ap.add_argument("--model", default=None, metavar="NAME")
+    ap.add_argument("--skip-risk", action="store_true")
+    ap.add_argument("--skip-discover", action="store_true")
+    ap.add_argument("--review-output", type=Path, default=None, metavar="PATH")
+    ap.add_argument("--skip-overview", action="store_true", help="Skip plain-language overview.json step.")
     args = ap.parse_args()
 
     compound = args.compound.strip()
-    compound_dir = (_DATA_DIR / _safe_dir_name(compound)).resolve()
-    compound_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.run_root is not None:
+        run_root = args.run_root.expanduser().resolve()
+        (run_root / "steps").mkdir(parents=True, exist_ok=True)
+        (run_root / "review").mkdir(parents=True, exist_ok=True)
+    else:
+        ticker = resolve_ticker([compound])
+        run_root = bootstrap_run_dirs(ticker)
+
+    steps_dir = (
+        args.steps_dir.expanduser().resolve()
+        if args.steps_dir is not None
+        else (run_root / "steps").resolve()
+    )
+    steps_dir.mkdir(parents=True, exist_ok=True)
+    review_dir = run_root / "review"
+    review_dir.mkdir(parents=True, exist_ok=True)
 
     py = sys.executable
-    do_evidence = not args.skip_evidence_audit
-    do_openalex = not args.skip_openalex_risk
-    n_steps = 6 + (1 if do_openalex else 0) + (1 if do_evidence else 0)
+    _PIPELINE_DIR = _PUMP_SCIENCE_DIR.parent
+    base_steps = 3 if not args.skip_discover else 4
+    n_steps = base_steps + 1 if args.skip_overview else base_steps + 2
 
     def lab(step: int) -> str:
         return f"{step}/{n_steps}"
 
-    # ------------------------------------------------------------------
-    # Step 1: Discover
-    # ------------------------------------------------------------------
+    step_num = 1
+    longevity_path = steps_dir / "longevity.json"
+    risk_path = steps_dir / "risk.json"
+    tagged_path = steps_dir / "material_tagged.jsonl"
+
     if args.skip_discover:
-        candidates = sorted(
-            compound_dir.glob("report_*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
+        from discover_lib.material import (  # noqa: E402
+            MATERIAL_FILENAME,
+            ensure_material_json,
+            find_discover_source,
         )
-        if not candidates:
-            print(
-                f"--skip-discover: no report_*.json found in {compound_dir}",
-                file=sys.stderr,
-            )
+
+        source = find_discover_source(steps_dir)
+        if source is None:
+            print(f"--skip-discover: no material.json or report_*.json found in {steps_dir}", file=sys.stderr)
             return 1
-        report_path = candidates[0]
-        print(f"\n[{lab(1)} discover] Skipped — using existing report: {report_path}", flush=True)
+        material_path = ensure_material_json(steps_dir, compound) or source
+        if material_path.name == MATERIAL_FILENAME and source.name.startswith("report_"):
+            print(
+                f"\n[{lab(step_num)} discover] Skipped — converted {source.name} -> material.json",
+                flush=True,
+            )
+        else:
+            print(f"\n[{lab(step_num)} discover] Skipped — using existing: {material_path}", flush=True)
     else:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-        report_path = compound_dir / f"report_{ts}.json"
-        _run(
-            f"{lab(1)} discover",
-            [py, _PUMP_SCIENCE_DIR / "discover.py", "--compound", compound, "--output", report_path],
-        )
-
-    # ------------------------------------------------------------------
-    # Step 2: Prepare (agent format, written beside the report file)
-    # ------------------------------------------------------------------
-    _run(
-        f"{lab(2)} prepare",
-        [py, _PUMP_SCIENCE_DIR / "prepare.py", str(report_path), "--format", "agent"],
-    )
-    # prepare.py names the output: prepared_<report_stem>_agent.json
-    prepared_path = compound_dir / f"prepared_{report_path.stem}_agent.json"
-    if not prepared_path.exists():
-        print(f"\n[{lab(2)} prepare] ERROR: expected output not found: {prepared_path}", file=sys.stderr)
-        return 1
-
-    # ------------------------------------------------------------------
-    # Step 3: List (one JSONL line per evaluation unit)
-    # ------------------------------------------------------------------
-    units_path = compound_dir / "units.jsonl"
-    _run(
-        f"{lab(3)} list",
-        [py, _PUMP_SCIENCE_DIR / "list.py", str(prepared_path), "-o", str(units_path)],
-    )
-
-    # ------------------------------------------------------------------
-    # Step 4: Tag (section + stance + risk severity)
-    # ------------------------------------------------------------------
-    tagged_path = compound_dir / "units_tagged.jsonl"
-    tag_cmd: list[str | Path] = [
-        py, _PUMP_SCIENCE_DIR / "tag.py",
-        str(units_path), "-o", str(tagged_path),
-    ]
-    if args.skip_risk:
-        tag_cmd.append("--skip-risk")
-    if args.model:
-        tag_cmd += ["--model", args.model]
-    _run(f"{lab(4)} tag", tag_cmd)
-
-    # ------------------------------------------------------------------
-    # Step 5: Group by stance
-    # ------------------------------------------------------------------
-    _run(
-        f"{lab(5)} group",
-        [py, _PUMP_SCIENCE_DIR / "group_by_stance.py", str(tagged_path)],
-    )
-    grouped_path = compound_dir / "grouped_by_stance.json"
-
-    step_num = 6
-
-    # ------------------------------------------------------------------
-    # Step 5b: Supplemental OpenAlex risk literature
-    # ------------------------------------------------------------------
-    if do_openalex:
-        oa_cmd: list[str | Path] = [
+        material_path = steps_dir / "material.json"
+        discover_cmd: list[str | Path] = [
             py,
-            _PUMP_SCIENCE_DIR / "openalex_risk_search.py",
+            _PUMP_SCIENCE_DIR / "discover.py",
             "--compound",
             compound,
             "--compound-dir",
-            str(compound_dir),
+            str(steps_dir),
+            "--incremental",
+            "--output",
+            str(material_path),
         ]
         if args.model:
-            oa_cmd += ["--model", args.model]
-        _run(f"{lab(step_num)} openalex-risk", oa_cmd)
+            discover_cmd += ["--model", args.model]
+        if not args.skip_risk:
+            discover_cmd.append("--include-risk-severity")
+        _run(f"{lab(step_num)} discover", discover_cmd)
+    step_num += 1
+
+    if args.skip_discover:
+        tag_cmd: list[str | Path] = [
+            py,
+            _PUMP_SCIENCE_DIR / "tag-group-filter.py",
+            str(material_path),
+            "--out-dir",
+            str(steps_dir),
+            "--tagged-output",
+            str(tagged_path),
+        ]
+        if not args.skip_risk:
+            tag_cmd.append("--include-risk-severity")
+        if args.model:
+            tag_cmd += ["--model", args.model]
+        _run(f"{lab(step_num)} tag-group-filter", tag_cmd)
         step_num += 1
 
-    # ------------------------------------------------------------------
-    # Review (three LLM passes)
-    # ------------------------------------------------------------------
+    longevity_groups_path = steps_dir / "longevity_groups.json"
+    risk_groups_path = steps_dir / "risk_groups.json"
+    _run(
+        f"{lab(step_num)} topic-grouper",
+        [py, _PUMP_SCIENCE_DIR / "topic_grouper.py", str(steps_dir)],
+    )
+    step_num += 1
+
     review_cmd: list[str | Path] = [
-        py, _PUMP_SCIENCE_DIR / "review.py", str(grouped_path),
+        py, _PUMP_SCIENCE_DIR / "review.py", str(longevity_path),
+        "--compound", compound,
+        "--risk", str(risk_path),
+        "--longevity-groups", str(longevity_groups_path),
+        "--risk-groups", str(risk_groups_path),
+        "--run-root", str(run_root),
     ]
     if args.model:
         review_cmd += ["--model", args.model]
@@ -221,34 +170,43 @@ def main() -> int:
     _run(f"{lab(step_num)} review", review_cmd)
     step_num += 1
 
-    repo_root = _DATA_DIR.parent.parent
-    safe_name = re.sub(r'[<>:"/\\|?*]', "_", compound).strip()
-    if args.review_output is not None:
-        review_path = args.review_output.expanduser().resolve()
-    else:
-        review_path = repo_root / "reviews" / "compounds" / safe_name / f"{safe_name}-review.json"
+    review_path = args.review_output.expanduser().resolve() if args.review_output else review_dir / "review.json"
+    overview_path = review_path.parent / "overview.json"
 
-    if do_evidence:
-        evidence_script = _PUMP_SCIENCE_DIR.parent / "evidence-doc.py"
-        evidence_cmd = [
+    if not args.skip_overview:
+        overview_cmd: list[str | Path] = [
             py,
-            evidence_script,
-            "-d",
-            str(compound_dir),
+            _PIPELINE_DIR / "overview.py",
+            str(review_path),
             "-o",
-            str(compound_dir / "evidence_audit.md"),
+            str(overview_path),
         ]
-        if review_path.is_file():
-            evidence_cmd.extend(["--review", str(review_path)])
-        _run(f"{lab(step_num)} evidence audit", evidence_cmd)
+        if args.model:
+            overview_cmd += ["--model", args.model]
+        _run(f"{lab(step_num)} overview", overview_cmd)
+        step_num += 1
 
-    print(f"\nPipeline complete.", flush=True)
+    evidence_out = review_path.parent / "evidence_audit.md"
+    evidence_cmd: list[str | Path] = [
+        py,
+        _PIPELINE_DIR / "evidence-doc.py",
+        "--data-dir",
+        str(steps_dir),
+        "--compound",
+        compound,
+        "--review",
+        str(review_path),
+        "-o",
+        str(evidence_out),
+    ]
+    _run(f"{lab(step_num)} evidence-audit", evidence_cmd)
+
+    print("\nPipeline complete.", flush=True)
     print(f"Review: {review_path}", flush=True)
-    if do_evidence:
-        print(f"Evidence audit: {compound_dir / 'evidence_audit.md'}", flush=True)
-    else:
-        print("Evidence audit: (skipped — run evidence-doc.py later)", flush=True)
-    print(f"Intermediate files in: {compound_dir}", flush=True)
+    if not args.skip_overview:
+        print(f"Overview: {overview_path}", flush=True)
+    print(f"Evidence audit: {evidence_out}", flush=True)
+    print(f"Steps: {steps_dir}", flush=True)
     return 0
 
 

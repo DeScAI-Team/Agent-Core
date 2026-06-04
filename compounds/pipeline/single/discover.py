@@ -1,43 +1,92 @@
 #!/usr/bin/env python3
-"""OpenFDA + ClinicalTrials.gov v2 + KEGG + Europe PMC → one JSON report."""
+"""Fetch compound evidence from public APIs → ``material.json`` (JSONL rows).
+
+Each line: ``{"source_type":"...","content":{...}}`` — same format as export JSONL.
+
+Modes:
+- **Incremental (default in run_review):** batched fetch with per-source caps, collection-time
+  dedupe, delta-tag between rounds.
+- **One-shot:** parallel full fetch (--one-shot), dedupe at serialize time.
+"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urljoin
 
-import requests
-
-TMO = 10
-KEGG_MAX = 50
-FDA, CT, KEGG, EPMC = (
-    "https://api.fda.gov/",
-    "https://clinicaltrials.gov/api/v2/studies",
-    "https://rest.kegg.jp/",
-    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+from discover_lib.chembl import fetch_chembl
+from discover_lib.clinical_trials import fetch_clinical_trials
+from discover_lib.dedupe import DiscoverRegistry
+from discover_lib.epmc import fetch_europe_pmc
+from discover_lib.http import CallBudget, MAX_HTTP_CALLS
+from discover_lib.kegg import fetch_kegg
+from discover_lib.material import (
+    MATERIAL_FILENAME,
+    append_material_rows,
+    init_material_file,
+    load_material_records,
+    serialize_material_jsonl,
 )
-FLAGS = [
-    ("mTOR", "mtor"), ("autophagy", "autophagy"), ("AMPK", "ampk"), ("apoptosis", "apoptosis"),
-    ("cell cycle", "cell cycle"), ("oxidative stress", "oxidative stress"), ("NAD", "nad"),
-    ("sirtuin", "sirtuin"), ("insulin signaling", "insulin signaling"), ("senescence", "senescence"),
-]
-LABELS = (
-    "adverse_reactions", "adverse_reactions_table", "boxed_warning", "boxed_warning_table",
-    "contraindications", "clinical_pharmacology", "pharmacokinetics", "mechanism_of_action", "drug_interactions",
-)
+from discover_lib.openalex import fetch_openalex_grounding, fetch_openalex_risk
+from discover_lib.openfda import fetch_openfda
+from discover_lib.pubchem import fetch_pubchem_bioassays
+from discover_lib.session import DiscoverSession, rows_from_one_shot_report
+from discover_lib.synonyms import resolve_compound_identity
 
-# Always absolute — avoids drive-relative / pathlib quirks that made cwd join land in repo root.
 _SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 _WIN_RESERVED = {
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
     "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 }
+
+
+class _SyncCallBudget:
+    def __init__(self, limit: int = MAX_HTTP_CALLS) -> None:
+        self.limit = limit
+        self.count = 0
+        self.exhausted = False
+        self._lock = threading.Lock()
+
+    def consume(self) -> bool:
+        with self._lock:
+            if self.count >= self.limit:
+                self.exhausted = True
+                return False
+            self.count += 1
+            return True
+
+
+class _SyncFailList(list):
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+
+    def append(self, item: dict[str, str]) -> None:
+        with self._lock:
+            super().append(item)
+
+
+class _DiscoverState:
+    def __init__(self) -> None:
+        self.budget = _SyncCallBudget()
+        self.fail: _SyncFailList = _SyncFailList()
+        self.ver: dict[str, Any] = {
+            "openfda": None,
+            "clinical_trials_gov": None,
+            "kegg": "KEGG REST",
+            "europe_pmc": None,
+            "pubchem": "PUG REST",
+            "chembl": "ChEMBL REST API",
+            "openalex": "OpenAlex REST API",
+        }
 
 
 def safe_compound_dir(compound: str) -> str:
@@ -47,298 +96,298 @@ def safe_compound_dir(compound: str) -> str:
     return safe
 
 
-def compound_output_dir(compound: str) -> Path:
-    return (_SCRIPT_DIR.parent.parent / "data" / safe_compound_dir(compound)).resolve()
+def compound_output_dir(compound: str, compound_dir: Path | None = None) -> Path:
+    if compound_dir is not None:
+        return compound_dir.resolve()
+    raise ValueError(
+        "No output directory specified. Pass --compound-dir or an absolute --output path."
+    )
 
 
-def output_file_path(compound: str, explicit: str | None) -> Path:
-    """Every non-absolute path is under pump-science/<compound>/ — never cwd (repo root)."""
-    folder = compound_output_dir(compound)
-    if explicit is None:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
-        return folder / f"report_{ts}.json"
-    raw = Path(explicit.strip()).expanduser()
-    if raw.is_absolute():
-        return raw.resolve()
-    target = (folder / raw).resolve()
-    try:
-        target.relative_to(folder)
-    except ValueError:
-        print(f"Refusing --output outside compound folder: {explicit!r}", file=sys.stderr)
-        raise SystemExit(2) from None
-    return target
+def output_file_path(compound: str, explicit: str | None, compound_dir: Path | None = None) -> Path:
+    if explicit is not None:
+        raw = Path(explicit.strip()).expanduser()
+        if raw.is_absolute():
+            return raw.resolve()
+        folder = compound_output_dir(compound, compound_dir)
+        target = (folder / raw).resolve()
+        try:
+            target.relative_to(folder)
+        except ValueError:
+            print(f"Refusing --output outside compound folder: {explicit!r}", file=sys.stderr)
+            raise SystemExit(2) from None
+        return target
+    folder = compound_output_dir(compound, compound_dir)
+    return folder / MATERIAL_FILENAME
 
 
-def L(x: Any) -> list[Any]:
-    return [] if x is None else x if isinstance(x, list) else [x]
-
-
-def req(url: str, fail: list, step: str, params=None, json_out=False):
-    try:
-        r = requests.get(url, params=params or {}, timeout=TMO)
-        if not r.ok:
-            fail.append({"step": step, "reason": f"HTTP {r.status_code}: {r.text[:500]}"})
-            return None
-        return r.json() if json_out else r.text
-    except requests.JSONDecodeError as e:
-        fail.append({"step": step, "reason": f"JSON decode error: {e}"})
-        return None
-    except requests.RequestException as e:
-        fail.append({"step": step, "reason": str(e)})
-        return None
-
-
-def phases(dm: Any) -> Any:
-    if not isinstance(dm, dict):
-        return None
-    for d in (dm, dm.get("designInfo") or {}):
-        if isinstance(d, dict):
-            for k in ("phases", "phase", "phasesList"):
-                if d.get(k) is not None:
-                    return d[k]
-    return None
-
-
-def slim_study(study: dict, vh: list) -> dict:
-    ps = study.get("protocolSection")
-    ps = ps if isinstance(ps, dict) else {}
-    sm, cm, om, scm = (ps.get(k) or {} for k in ("statusModule", "conditionsModule", "outcomesModule", "sponsorCollaboratorsModule"))
-    dm, idm = ps.get("designModule") or {}, ps.get("identificationModule") or {}
-    misc = (study.get("derivedSection") or {}).get("miscInfoModule") or {}
-    if not vh[0] and isinstance(misc.get("versionHolder"), str):
-        vh[0] = misc["versionHolder"]
-    lead = (scm.get("leadSponsor") or {})
-    po, so = om.get("primaryOutcomes"), om.get("secondaryOutcomes")
-    rs = study.get("resultsSection")
-    om_mod = rs.get("outcomeMeasuresModule", {}) if isinstance(rs, dict) else {}
-    ms = om_mod.get("outcomeMeasures")
-    rsum = None
-    if isinstance(rs, dict):
-        rsum = {"has_outcome_measures_module": bool(om_mod), "outcome_measures_count": len(ms) if isinstance(ms, list) else None}
-    os = ("measure", "description", "timeFrame")
-    return {
-        "nct_id": idm.get("nctId"), "brief_title": idm.get("briefTitle"), "phases": phases(dm),
-        "conditions": cm.get("conditions"),
-        "primary_outcomes": [{k: x.get(k) for k in os} for x in po if isinstance(x, dict)] if isinstance(po, list) else None,
-        "secondary_outcomes": [{k: x.get(k) for k in os} for x in so if isinstance(x, dict)] if isinstance(so, list) else None,
-        "overall_status": sm.get("overallStatus"), "start_date": sm.get("startDateStruct"),
-        "primary_completion_date": sm.get("primaryCompletionDateStruct"), "completion_date": sm.get("completionDateStruct"),
-        "study_first_submit_date": sm.get("studyFirstSubmitDate"), "has_results": study.get("hasResults"),
-        "results_summary": rsum, "lead_sponsor_name": lead.get("name"), "lead_sponsor_class": lead.get("class"),
-    }
+def serialize_report_deduped(report: dict[str, Any]) -> str:
+    registry = DiscoverRegistry()
+    rows = rows_from_one_shot_report(report, registry)
+    return "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows)
 
 
 def run(c: str) -> dict[str, Any]:
-    fail: list[dict[str, str]] = []
-    ver: dict[str, Any] = {"openfda": None, "clinical_trials_gov": None, "kegg": "KEGG REST", "europe_pmc": None}
+    """Fetch all sources in parallel; return nested discover report dict."""
+    state = _DiscoverState()
+    identity = resolve_compound_identity(c, state.fail, state.budget)
+    query_names = identity.get("query_names") or [c]
+    primary_cid = identity.get("primary_cid")
 
-    ev = req(urljoin(FDA, "drug/event.json"), fail, "openfda_event", {"search": f"patient.drug.medicinalproduct:{c.upper()}", "limit": 100}, True)
-    if isinstance(ev, dict) and ev.get("meta"):
-        ver["openfda"] = ev["meta"]
-    lb = req(urljoin(FDA, "drug/label.json"), fail, "openfda_label", {"search": f"openfda.generic_name:{c.title()}", "limit": 10}, True)
-    if ver["openfda"] is None and isinstance(lb, dict) and lb.get("meta"):
-        ver["openfda"] = lb["meta"]
+    results: dict[str, Any] = {}
 
-    ae, dl = None, None
-    label_filter_dropped = 0
-    if isinstance(ev, dict):
-        rows = ev.get("results")
-        if isinstance(rows, list):
-            terms = set()
-            for it in rows:
-                for p in L(it.get("patient")):
-                    if isinstance(p, dict):
-                        for rx in L(p.get("reaction")):
-                            if isinstance(rx, dict):
-                                t = rx.get("reactionmeddrapt") or rx.get("reactionmeddraversionpt")
-                                if isinstance(t, str) and t.strip():
-                                    terms.add(t.strip())
-            ae = {"reaction_terms": sorted(terms), "report_count": len(rows), "meta": ev.get("meta")}
-        else:
-            ae = {"reaction_terms": [], "report_count": 0, "meta": ev.get("meta")}
-    if isinstance(lb, dict):
-        rs = lb.get("results")
-        if isinstance(rs, list):
-            c_lower = c.lower()
-            # Keep only labels whose openfda.generic_name list contains the queried
-            # compound name as a case-insensitive substring.  Multi-ingredient products
-            # whose generic_name field merely happens to tokenise-match an unrelated
-            # compound are discarded here rather than propagating into downstream units.
-            filtered = [
-                x for x in rs
-                if isinstance(x, dict) and any(
-                    c_lower in gn.lower()
-                    for gn in (x.get("openfda") or {}).get("generic_name", [])
-                    if isinstance(gn, str)
-                )
-            ]
-            label_filter_dropped = len(rs) - len(filtered)
-            dl = [{k: x.get(k) for k in LABELS} for x in filtered]
-        else:
-            dl = []
+    def _openfda() -> None:
+        block, _, dropped, aliases = fetch_openfda(query_names, state.fail, state.budget, state.ver)
+        results["openfda"] = block
+        results["label_filter_dropped"] = dropped
+        results["aliases_tried"] = aliases
 
-    ct_raw = req(CT, fail, "clinical_trials", {"query.term": c, "pageSize": 100, "format": "json"}, True)
-    ct_out = None
-    if isinstance(ct_raw, dict):
-        studies = ct_raw.get("studies")
-        if not isinstance(studies, list):
-            ct_out = {"studies": [], "version_holder": None}
-        else:
-            vh_box: list[str | None] = [None]
-            slim = [slim_study(s, vh_box) for s in studies if isinstance(s, dict)]
-            ct_out = {"studies": slim, "study_count": len(slim), "version_holder": vh_box[0]}
-        ver["clinical_trials_gov"] = {"api": "v2", "data_version_holder": ct_out.get("version_holder")}
+    def _clinical_trials() -> None:
+        results["clinical_trials"] = fetch_clinical_trials(query_names, state.fail, state.budget, state.ver)
 
-    # KEGG
-    kg = None
-    txt = req(urljoin(KEGG, f"find/drug/{quote(c, safe='')}"), fail, "kegg_find", json_out=False)
-    if txt is not None:
-        drs = [ln.split("\t", 1)[0] for ln in txt.strip().splitlines() if "\t" in ln and ln.split("\t", 1)[0].startswith("dr:")]
-        if not drs:
-            kg = {"kegg_drug_ids": [], "pathways": [], "pathway_names": [], "longevity_pathway_flags": {a: False for a, _ in FLAGS}, "truncated": False}
-        else:
-            pids: set[str] = set()
-            for dr in drs:
-                lt = req(urljoin(KEGG, f"link/pathway/{dr}"), fail, f"kegg_link:{dr}", json_out=False)
-                if lt:
-                    for line in lt.strip().splitlines():
-                        pids.update(p[5:] for p in line.split("\t") if p.startswith("path:"))
-            ordered = sorted(pids)
-            ent = []
-            for pid in ordered[:KEGG_MAX]:
-                body = req(urljoin(KEGG, f"get/{pid}"), fail, f"kegg_get:{pid}", json_out=False) or ""
-                name = next((ln[4:].strip() or None for ln in body.splitlines() if ln.startswith("NAME")), None)
-                m = re.search(r"^DESCRIPTION\s+(.+?)(?=^\w+\s+|\Z)", body, re.M | re.S)
-                desc = (m.group(1).strip()[:2000] or None) if m else None
-                ent.append({"pathway_id": pid, "name": name, "description_snippet": desc})
-            blob = " ".join(f'{e.get("name") or ""} {e.get("description_snippet") or ""}' for e in ent).lower()
-            kg = {
-                "kegg_drug_ids": drs, "pathway_ids": ordered, "pathway_count": len(ordered), "pathways": ent,
-                "pathway_names": [e["name"] for e in ent if e.get("name")],
-                "longevity_pathway_flags": {a: (b in blob) for a, b in FLAGS}, "truncated": len(ordered) > KEGG_MAX, "pathway_get_limit": KEGG_MAX,
-            }
+    def _kegg() -> None:
+        results["kegg"] = fetch_kegg(query_names, state.fail, state.budget)
 
-    # Europe PMC — dedupe pmid > pmcid > doi > id; merge prefers longer abstract then citations
-    merged: dict[str, dict] = {}
+    def _epmc() -> None:
+        results["europe_pmc"] = fetch_europe_pmc(c, query_names, state.fail, state.budget, state.ver)
 
-    def cite(x):
-        try:
-            return int(x)
-        except (TypeError, ValueError):
-            try:
-                return int(float(str(x)))
-            except (TypeError, ValueError):
-                return 0
+    def _chembl() -> None:
+        results["chembl"] = fetch_chembl(query_names, state.fail, state.budget)
 
-    def pick(a, b):
-        la, lb = len((a.get("abstract") or "") or ""), len((b.get("abstract") or "") or "")
-        if lb > la or (la == lb and cite(b.get("citedByCount")) > cite(a.get("citedByCount"))):
-            return b
-        return a
+    def _pubchem() -> None:
+        results["pubchem_bioassays"] = fetch_pubchem_bioassays(primary_cid, state.fail, state.budget)
 
-    for qn, q in (("longevity", f'"{c}" AND longevity'), ("aging", f'"{c}" AND aging'), ("lifespan", f'"{c}" AND lifespan')):
-        d = req(EPMC, fail, f"europe_pmc:{qn}", {"query": q, "format": "json", "pageSize": 50, "resultType": "core"}, True)
-        if ver["europe_pmc"] is None and isinstance(d, dict):
-            ver["europe_pmc"] = {k: d.get(k) for k in ("version", "release", "hitCount")}
-        rl = d.get("resultList") if isinstance(d, dict) else None
-        if not isinstance(rl, dict):
-            continue
-        for hit in L(rl.get("result")):
-            if not isinstance(hit, dict):
-                continue
-            key = None
-            for pref, fld in (("pmid", "pmid"), ("pmcid", "pmcid"), ("doi", "doi"), ("id", "id")):
-                v = hit.get(fld)
-                if v:
-                    key = f"{pref}:{v}"
-                    break
-            if not key:
-                continue
-            s = hit.get("authorString")
-            auth = [x.strip() for x in s.split(",") if x.strip()] if isinstance(s, str) else None
-            if auth is None and isinstance(hit.get("authorList"), dict):
-                auth = [x.get("fullName") for x in L(hit["authorList"].get("author")) if isinstance(x, dict)]
-                auth = [n for n in auth if n] or None
-            rec = {
-                "title": hit.get("title"), "authors": auth, "journal": hit.get("journalTitle") or hit.get("journal"),
-                "year": hit.get("pubYear"), "doi": hit.get("doi"), "abstract": hit.get("abstractText") or hit.get("abstract"),
-                "citedByCount": hit.get("citedByCount"), "source_queries": [],
-            }
-            if key not in merged:
-                rec["source_queries"] = [qn]
-                merged[key] = rec
-            else:
-                prev = merged[key]
-                w = pick(prev, rec)
-                w["source_queries"] = sorted(set(prev.get("source_queries") or []) | {qn})
-                merged[key] = w
+    def _openalex_grounding() -> None:
+        results["openalex_grounding"] = fetch_openalex_grounding(c)
 
-    epmc = {"articles": list(merged.values()), "unique_count": len(merged)}
+    def _openalex_risk() -> None:
+        results["openalex_risk"] = fetch_openalex_risk(c)
+
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="discover") as pool:
+        futures = [
+            pool.submit(_openfda),
+            pool.submit(_clinical_trials),
+            pool.submit(_kegg),
+            pool.submit(_epmc),
+            pool.submit(_chembl),
+            pool.submit(_pubchem),
+            pool.submit(_openalex_grounding),
+            pool.submit(_openalex_risk),
+        ]
+        for fut in as_completed(futures):
+            fut.result()
+
+    if state.budget.exhausted:
+        state.fail.append({"step": "discover", "reason": f"HTTP call budget exhausted at {state.budget.count} calls"})
 
     return {
         "compound_name": c,
-        "openfda": {"adverse_events": ae, "drug_labels": dl if lb is not None else None},
-        "clinical_trials": ct_out,
-        "kegg": kg,
-        "europe_pmc": epmc,
+        "openfda": results.get("openfda"),
+        "clinical_trials": results.get("clinical_trials"),
+        "kegg": results.get("kegg"),
+        "europe_pmc": results.get("europe_pmc"),
+        "chembl": results.get("chembl"),
+        "pubchem_bioassays": results.get("pubchem_bioassays"),
+        "openalex_grounding": results.get("openalex_grounding"),
+        "openalex_risk": results.get("openalex_risk"),
         "metadata": {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "api_versions": ver,
-            "failures": fail,
-            "label_filter_dropped": label_filter_dropped,
+            "api_versions": state.ver,
+            "failures": list(state.fail),
+            "label_filter_dropped": results.get("label_filter_dropped", 0),
+            "resolved_identity": identity,
+            "query_names": query_names,
+            "openfda_aliases_tried": results.get("aliases_tried"),
+            "http_calls": state.budget.count,
         },
     }
 
 
+def run_material(c: str) -> dict[str, Any]:
+    """Fetch all sources and return in-memory report (for tests)."""
+    return run(c)
+
+
+def _run_delta_tag(
+    material_path: Path,
+    out_dir: Path,
+    *,
+    model: str | None,
+    include_risk_severity: bool,
+) -> None:
+    cmd: list[str] = [
+        sys.executable,
+        str(_SCRIPT_DIR / "tag-group-filter.py"),
+        str(material_path),
+        "--out-dir",
+        str(out_dir),
+        "--incremental",
+        "--tagged-output",
+        str(out_dir / "material_tagged.jsonl"),
+    ]
+    if model:
+        cmd += ["--model", model]
+    if include_risk_severity:
+        cmd.append("--include-risk-severity")
+    subprocess.run(cmd, check=True)
+
+
+def run_incremental(
+    c: str,
+    compound_dir: Path,
+    *,
+    max_rounds: int | None = None,
+    fresh_material: bool = False,
+    model: str | None = None,
+    include_risk_severity: bool = False,
+    skip_tag: bool = False,
+) -> Path:
+    """Incremental discover: batch fetch → append → delta-tag until caps or no new rows."""
+    compound_dir = compound_dir.resolve()
+    material_path = compound_dir / MATERIAL_FILENAME
+    session = DiscoverSession.create(c)
+    limits = session.limits
+    max_r = max_rounds if max_rounds is not None else limits.max_rounds
+
+    if fresh_material or not material_path.is_file():
+        init_material_file(material_path, c, fresh=True)
+    else:
+        existing = load_material_records(material_path)
+        session.registry.keys_from_material_rows(existing)
+
+    print(f"Incremental discover: max_rounds={max_r}", file=sys.stderr)
+
+    for _ in range(max_r):
+        new_rows = session.fetch_round_rows()
+        meta_row = {
+            "source_type": "discover_round_meta",
+            "content": {
+                "round": session.round_num,
+                "new_rows": len(new_rows),
+                "http_calls": session.budget.count if session.budget else 0,
+                "counts_by_source": dict(session.registry.count_by_source),
+                "exhausted": dict(session.source_exhausted),
+            },
+        }
+        append_material_rows(material_path, [meta_row])
+        if new_rows:
+            append_material_rows(material_path, new_rows)
+            print(
+                f"  round {session.round_num}: +{len(new_rows)} rows "
+                f"(total keys {len(session.registry.seen)})",
+                file=sys.stderr,
+            )
+            if not skip_tag:
+                _run_delta_tag(
+                    material_path,
+                    compound_dir,
+                    model=model,
+                    include_risk_severity=include_risk_severity,
+                )
+        else:
+            print(f"  round {session.round_num}: no new rows", file=sys.stderr)
+            break
+        if session.all_sources_exhausted():
+            print("  all sources exhausted", file=sys.stderr)
+            break
+
+    discover_meta = {
+        "source_type": "discover_metadata",
+        "content": {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "incremental": True,
+            "rounds": session.round_num,
+            "failures": list(session.fail),
+            "api_versions": session.ver,
+            "registry_counts": dict(session.registry.count_by_source),
+        },
+    }
+    append_material_rows(material_path, [discover_meta])
+    return material_path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Compound intel from public APIs.",
-        epilog=(
-            "Default: writes UTF-8 JSON to a subfolder named after the compound next to this script "
-            f"(under {_SCRIPT_DIR}), as <compound>/report_<UTC>.json. That does not run if you pass --stdout "
-            "or an explicit --output path. The resolved output path is printed to stderr after a successful write."
-        ),
+        description="Compound intel from public APIs → material.json.",
+        epilog=f"Default incremental when --incremental; use --one-shot for legacy parallel fetch.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--compound", required=True)
+    ap.add_argument("--compound-dir", type=Path, default=None, metavar="DIR")
+    ap.add_argument("--output", metavar="PATH", default=None)
+    ap.add_argument("--stdout", action="store_true")
     ap.add_argument(
-        "--output",
-        metavar="PATH",
-        default=None,
-        help=(
-            f"UTF-8 JSON path. Default: timestamped file under {_SCRIPT_DIR}{os.sep}<compound>{os.sep}. "
-            "If relative, it is resolved under that compound folder only (not the shell cwd)."
-        ),
-    )
-    ap.add_argument(
-        "--stdout",
+        "--incremental",
         action="store_true",
-        help="Print JSON to stdout only (no file write).",
+        help="Incremental batched discover with delta-tag between rounds.",
     )
+    ap.add_argument(
+        "--one-shot",
+        action="store_true",
+        help="Legacy single parallel fetch (no incremental loop).",
+    )
+    ap.add_argument("--max-rounds", type=int, default=None, metavar="N")
+    ap.add_argument("--fresh-material", action="store_true", help="Truncate material.json before run.")
+    ap.add_argument("--model", default=None, help="LLM model for delta-tag passes.")
+    ap.add_argument("--skip-tag", action="store_true", help="Incremental discover only; no tag-group-filter.")
+    ap.add_argument("--include-risk-severity", action="store_true")
     ns = ap.parse_args()
     c = ns.compound.strip()
+    compound_dir = ns.compound_dir.expanduser().resolve() if ns.compound_dir else None
+
+    use_incremental = bool(ns.incremental) and not ns.one_shot
+
     try:
-        out = json.dumps(run(c), indent=2, ensure_ascii=False) + "\n"
+        if use_incremental:
+            if compound_dir is None:
+                print("discover.py: --compound-dir required for incremental mode", file=sys.stderr)
+                return 1
+            path = run_incremental(
+                c,
+                compound_dir,
+                max_rounds=ns.max_rounds,
+                fresh_material=ns.fresh_material,
+                model=ns.model,
+                include_risk_severity=ns.include_risk_severity,
+                skip_tag=ns.skip_tag,
+            )
+            if ns.stdout:
+                out = path.read_text(encoding="utf-8")
+                n_records = out.count("\n") if out else 0
+            else:
+                path = output_file_path(c, ns.output, compound_dir=compound_dir)
+                n_records = path.read_text(encoding="utf-8").count("\n") if path.is_file() else 0
+        else:
+            report = run(c)
+            out = serialize_report_deduped(report)
+            n_records = out.count("\n") if out else 0
+            if ns.stdout:
+                pass
+            else:
+                path = output_file_path(c, ns.output, compound_dir=compound_dir)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(out, encoding="utf-8")
     except Exception as e:
-        out = json.dumps(
-            {
-                "compound_name": c or None, "openfda": None, "clinical_trials": None, "kegg": None, "europe_pmc": None,
-                "metadata": {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "api_versions": {"openfda": None, "clinical_trials_gov": None, "kegg": None, "europe_pmc": None},
-                    "failures": [{"step": "fatal", "reason": str(e)}],
-                },
+        report = {
+            "compound_name": c or None,
+            "metadata": {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "failures": [{"step": "fatal", "reason": str(e)}],
             },
-            indent=2,
-            ensure_ascii=False,
-        ) + "\n"
+        }
+        out = serialize_report_deduped(report)
+        n_records = out.count("\n") if out else 0
+        if not ns.stdout and compound_dir:
+            path = output_file_path(c, ns.output, compound_dir=compound_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(out, encoding="utf-8")
+
     if ns.stdout:
         sys.stdout.buffer.write(out.encode("utf-8"))
+    elif not use_incremental:
+        print(f"Wrote material: {path} ({n_records} records)", file=sys.stderr)
     else:
-        path = output_file_path(c, ns.output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(out, encoding="utf-8")
-        print(f"Wrote report: {path}", file=sys.stderr)
+        print(f"Wrote material: {path} ({n_records} records)", file=sys.stderr)
     return 0
 
 

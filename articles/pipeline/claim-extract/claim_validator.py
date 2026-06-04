@@ -24,16 +24,21 @@ import os
 import re
 from collections import defaultdict
 
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
+import sys
+from pathlib import Path as _Path
 
-load_dotenv()
+from openai import AsyncOpenAI
+
+_ARTICLES = _Path(__file__).resolve().parents[2]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+from llm_env import LLM_API_KEY, LLM_BASE_URL  # noqa: E402
 
 # === CONFIG ===
-VLLM_BASE_URL         = os.environ.get("VLLM_BASE_URL",            "http://localhost:8000/v1")
-VLLM_API_KEY          = os.environ.get("VLLM_API_KEY",             "none")
+VLLM_BASE_URL = LLM_BASE_URL
+VLLM_API_KEY = LLM_API_KEY
 
-MODEL                 = os.environ.get("VALIDATOR_MODEL",           "mixtral-8x7b-instruct")
+MODEL = os.environ.get("LLM_MODEL") or os.environ.get("VALIDATOR_MODEL", "mixtral-8x7b-instruct")
 CONCURRENCY           = int(os.environ.get("VALIDATOR_CONCURRENCY", "15"))
 
 MAX_RETRIES           = 3

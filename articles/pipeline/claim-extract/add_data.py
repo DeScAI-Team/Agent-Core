@@ -14,10 +14,14 @@ from docling.chunking import HybridChunker
 from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
 from docling_core.types.doc import PictureItem, TableItem
 from transformers import AutoTokenizer
+import sys
 from openai import OpenAI
-from dotenv import load_dotenv
 
-load_dotenv()
+_ARTICLES = Path(__file__).resolve().parents[2]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+
+from llm_env import make_client, tagger_model  # noqa: E402
 
 # === CONFIG ===
 EMBED_MODEL_ID = "BAAI/bge-m3"
@@ -35,11 +39,11 @@ ALLOWED_SEMANTIC_CATEGORIES = {
     "other",
 }
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-HEADING_MODEL = os.environ.get("VALIDATOR_MODEL", "/model")
+_heading_client = make_client(tagger=True)
 
-_heading_client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
+
+def _heading_model() -> str:
+    return tagger_model()
 
 # === SETUP ===
 tokenizer = HuggingFaceTokenizer(
@@ -122,7 +126,7 @@ def get_semantic_heading_map(headings_list):
     for attempt in range(1, HEADING_CLASSIFIER_RETRIES + 1):
         try:
             response = _heading_client.chat.completions.create(
-                model=HEADING_MODEL,
+                model=_heading_model(),
                 max_tokens=1024,
                 temperature=0,
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},

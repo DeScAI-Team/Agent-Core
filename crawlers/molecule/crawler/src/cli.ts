@@ -1,5 +1,7 @@
 import "./load-repo-env.js"
-import * as fs from "node:fs/promises"
+import { spawnSync } from "node:child_process"
+import * as fs from "node:fs"
+import * as fsp from "node:fs/promises"
 import * as path from "node:path"
 import {
   getAllProjects,
@@ -13,6 +15,13 @@ import {
 } from "./ipnft-profile.js"
 import { classifyProfileSkip } from "./profile-screen.js"
 import { runDataBundle } from "./data-bundle.js"
+import { runAggregateLinks } from "./aggregate-links.js"
+import {
+  ensureProjectLayout,
+  METADATA_DIR,
+  PROFILE_FILENAME,
+  profileJsonPath,
+} from "./ipnft-layout.js"
 
 const DEFAULT_ORCHESTRATOR_OUT_DIR = "out/test-profiles/profiles"
 
@@ -37,6 +46,13 @@ function resolveCrawlersDirArg(raw: string): string {
   return path.resolve(trimmed)
 }
 
+/** Prefer repo Agent venv python when present (crawl4ai lives there). */
+function resolveAgentPython(): string {
+  const agentPy = path.resolve(process.cwd(), "..", "..", "..", "Agent", "bin", "python3")
+  if (fs.existsSync(agentPy)) return agentPy
+  return process.platform === "win32" ? "python" : "python3"
+}
+
 function usage(): void {
   console.error(`Usage:
   npm run cli -- projects [-- --limit N]
@@ -46,7 +62,10 @@ function usage(): void {
   npm run cli -- profiles [-- --max N] [--out-dir dir] [--competent-only] [--save-all] [--compound-suffixes 1] [--ipt-limit 25] [--delay-ms 150] [--index]
   npm run cli -- orchestrate-profiles [-- --out-dir out/test-profiles/profiles] [--save-all] [--max N] [--compound-suffixes 1] [--ipt-limit 25] [--delay-ms 150] [--no-index]
   npm run cli -- data-bundle [-- --profiles-dir out/ipnft-profiles] [--delay-ms 300] [--max N] [--dry-run] [--crawl-skip-file path.json]
-  npm run cli -- crawl --output-dir <dir> [--save-all] [--index] [--max N] [--delay-ms 150] [--compound-suffixes ...] [--ipt-limit N] [--dry-run] [--crawl-skip-file path.json]
+  npm run cli -- crawl --output-dir <dir> [--save-all] [--index] [--max N] [--delay-ms 150] [--compound-suffixes ...] [--ipt-limit N] [--dry-run] [--no-crawl-links] [--no-crawl-nitter] [--concurrency N] [--force] [--max-tweets N] [--doc-max-depth N] [--doc-max-pages N] [--min-chars N] [--hub-min-chars N] [--max-outbound-follows N] [--spa-wait-sec N] [--crawl-skip-file path.json]
+  npm run cli -- aggregate-links --ipnfts-dir <dir> [--no-validate-links]
+  npm run cli -- crawl-links --ipnfts-dir <dir> [--concurrency N] [--max N] [--folder NAME] [--force] [--dry-run] [--doc-max-depth N] [--doc-max-pages N] [--min-chars N] [--hub-min-chars N] [--max-outbound-follows N] [--spa-wait-sec N] [--crawl-skip-file path.json]
+  npm run cli -- crawl-nitter --ipnfts-dir <dir> [--concurrency N] [--max N] [--folder NAME] [--force] [--max-tweets N] [--nitter-base URL] [--nitter-fallback-bases URL,...] [--crawl-skip-file path.json]
   (Use @crawlers/output/... from molecule/crawler to write under repo crawlers/; run npm from crawlers/molecule/crawler — see Examples.)
 
 Legacy per-command scripts (npm run projects, npm run profiles, …) still work the same.
@@ -62,10 +81,17 @@ Examples:
   npm run data-bundle -- --profiles-dir out/ipnft-profiles --max 3 --dry-run
   npm run cli -- crawl --output-dir out/ipnft-profiles-test --max 2 --index
   npm run cli -- crawl --output-dir @crawlers/output/molecule --max 3 --index
+  npm run crawl-links -- --ipnfts-dir @crawlers/output/molecule/ipnfts --folder BeeARD --concurrency 1
 
-crawl: runs profiles then data-bundle on the same directory. By default the profile phase only writes folders for competent Data API rows (skips null ipnft and thin metadata), like orchestrate-profiles; pass --save-all to also save null/stub bundles. --output-dir is required. Paths are resolved from cwd unless they start with @crawlers/ (then under repo …/crawlers/…). Same @crawlers/ prefix works for profiles --out-dir and data-bundle --profiles-dir. Example: @crawlers/output/molecule. Or ../../output/molecule from molecule/crawler. --max N applies to both phases: at most N catalog rows in the profile batch, then at most N profile folders with a valid ipnft.id in data-bundle (readdir order). --dry-run affects only the data-bundle step (no downloads; profiles always run). If the profile batch throws, data-bundle is skipped. The data-bundle step only processes profile.json files that include ipnft.id (null-ipnft bundles are skipped). Optional --crawl-skip-file points to JSON { moleculeFolders, researchhubFiles } to skip known project folders (incremental crawl).
+crawl: runs profiles, data-bundle, aggregate-links, crawl-links (crawl4ai), and crawl-nitter on the same --output-dir. By default the profile phase only writes folders for competent Data API rows (skips null ipnft and thin metadata), like orchestrate-profiles; pass --save-all to also save null/stub bundles. --output-dir is required. Paths are resolved from cwd unless they start with @crawlers/ (then under repo …/crawlers/…). Example: @crawlers/output/molecule/ipnfts. --max N applies to all phases. --dry-run skips dataroom downloads and passes through to Python crawlers (preview only). Pass --no-crawl-links or --no-crawl-nitter to skip steps. Python crawler flags (--concurrency, --force, --min-chars, --max-tweets, …) work on crawl too. Optional --crawl-skip-file points to JSON { moleculeFolders, researchhubFiles } to skip known project folders.
 
-data-bundle: reads profile folders, fetches dataroom for each ipnft.id, downloads PUBLIC documents (deduped by description), saves PDFs + manifest.json per project.
+crawl-nitter: reads nitter.net profile URLs from metadata JSON → output/tweets.json and metadata/nitter-manifest.json. RSS first, HTML fallback; --nitter-base / --nitter-fallback-bases for alternate instances.
+
+aggregate-links: for each project folder under --ipnfts-dir, extracts URL strings from JSON under metadata/ (legacy: project root) and writes metadata/links.json. Probes http(s) URLs in parallel; ipfs:// URLs are checked against multiple public gateways in parallel (longer timeout) and omitted from output when no gateway returns data. Skips dataroom.json and manifest.json (data-bundle downloads), tokenUri (profile API metadata), dataApi (Molecule API docs), bare https://molecule.xyz homepages, etherscan.io links, and any URL listed as a dataroom downloadUrl. Rewrites x.com/twitter.com URLs to nitter.net. Does not read PDFs or other non-JSON artifacts.
+
+crawl-links: reads metadata/links.json per IPNFT folder and crawls eligible http(s) URLs with crawl4ai (Python, Agent venv). Skips nitter.net, ipfs links, block explorers (basescan.org, etherscan.io, …), and social URLs (t.me/Telegram, x.com, Discord, …). Doc/docs URLs use BestFirst deep crawl with prefetch, then merge all pages into one {site}.md with section-level dedupe (no media). molecule.xyz / mint.molecule.to use hub mode: single SPA fetch (no site-wide deep crawl), link extraction with catalog blocklists, bounded off-site follows (--max-outbound-follows, default 12), optional mint fallback on 404; writes metadata/crawl-extracted-links.json sidecar. snapshot.box uses SPA single-page mode. Other URLs are section-deduped single-page crawls. Drops short output (--min-chars, default 400; hub pages --hub-min-chars, default 150) and short sections (--min-section-chars, default 80). Saves .md under output/ and metadata/crawl-manifest.json. Runs many IPNFT folders in parallel (--concurrency, default 4).
+
+data-bundle: reads metadata/profile.json (legacy: root profile.json), fetches dataroom for each ipnft.id, downloads PUBLIC documents (deduped by description) into output/ with metadata/manifest.json.
 
 orchestrate-profiles: same as profiles default out-dir, but only writes symbol folders when the Data API returns a competent catalog profile (use --save-all to disable). Index lists saved + skipped with reasons.
 
@@ -88,11 +114,22 @@ function parseMaxProjects(): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
+function parseValidateLinks(): boolean {
+  return !process.argv.includes("--no-validate-links")
+}
+
 function parseDelayMs(): number {
   const v = getFlag("--delay-ms")
   if (v === undefined || v === "") return 150
   const n = Number(v)
   return Number.isFinite(n) && n >= 0 ? n : 150
+}
+
+function aggregateLinksOptions(ipnftsDir: string) {
+  return {
+    ipnftsDir,
+    validateLinks: parseValidateLinks(),
+  }
 }
 
 function parseCompoundSuffixes(): string[] {
@@ -167,8 +204,8 @@ async function cmdProfile(tokenId: string): Promise<void> {
   const outPath = getFlag("--out")
   const text = JSON.stringify(payload, null, 2)
   if (outPath) {
-    await fs.mkdir(path.dirname(path.resolve(outPath)), { recursive: true })
-    await fs.writeFile(outPath, text, "utf-8")
+    await fsp.mkdir(path.dirname(path.resolve(outPath)), { recursive: true })
+    await fsp.writeFile(outPath, text, "utf-8")
     console.error(`Wrote ${outPath}`)
   } else {
     console.log(text)
@@ -179,7 +216,7 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms))
 }
 
-const PROFILE_BUNDLE_FILENAME = "profile.json"
+const PROFILE_BUNDLE_FILENAME = PROFILE_FILENAME
 
 /** Windows / POSIX reserved characters in path segments */
 function sanitizeSymbolForDir(raw: string): string {
@@ -261,7 +298,7 @@ async function runProfilesBatch(opts: ProfileBatchOptions): Promise<void> {
   )
 
   const resolvedOut = path.resolve(opts.outDir)
-  await fs.mkdir(resolvedOut, { recursive: true })
+  await fsp.mkdir(resolvedOut, { recursive: true })
 
   const claimedDirNames = new Set<string>()
 
@@ -342,9 +379,9 @@ async function runProfilesBatch(opts: ProfileBatchOptions): Promise<void> {
       } else {
         const folderName = allocateProjectDirName(symbol, tokenId, claimedDirNames)
         const projectDir = path.join(resolvedOut, folderName)
-        await fs.mkdir(projectDir, { recursive: true })
-        const relFile = path.join(folderName, PROFILE_BUNDLE_FILENAME)
-        const filePath = path.join(projectDir, PROFILE_BUNDLE_FILENAME)
+        await ensureProjectLayout(projectDir)
+        const relFile = path.join(folderName, METADATA_DIR, PROFILE_BUNDLE_FILENAME)
+        const filePath = profileJsonPath(projectDir)
         const payload = {
           tokenId,
           symbol,
@@ -356,7 +393,7 @@ async function runProfilesBatch(opts: ProfileBatchOptions): Promise<void> {
           iptTokens,
           error: fetchError,
         }
-        await fs.writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8")
+        await fsp.writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8")
         indexRows.push({
           status: "saved",
           tokenId,
@@ -389,9 +426,9 @@ async function runProfilesBatch(opts: ProfileBatchOptions): Promise<void> {
 
     const folderName = allocateProjectDirName(symbol, tokenId, claimedDirNames)
     const projectDir = path.join(resolvedOut, folderName)
-    await fs.mkdir(projectDir, { recursive: true })
-    const relFile = path.join(folderName, PROFILE_BUNDLE_FILENAME)
-    const filePath = path.join(projectDir, PROFILE_BUNDLE_FILENAME)
+    await ensureProjectLayout(projectDir)
+    const relFile = path.join(folderName, METADATA_DIR, PROFILE_BUNDLE_FILENAME)
+    const filePath = profileJsonPath(projectDir)
     const payload = {
       tokenId,
       symbol,
@@ -403,7 +440,7 @@ async function runProfilesBatch(opts: ProfileBatchOptions): Promise<void> {
       iptTokens,
       dataApi: "https://docs.molecule.xyz/api-reference/data-api",
     }
-    await fs.writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8")
+    await fsp.writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8")
     indexRows.push({
       status: "saved",
       tokenId,
@@ -426,7 +463,7 @@ async function runProfilesBatch(opts: ProfileBatchOptions): Promise<void> {
 
   if (opts.writeIndex) {
     const indexPath = path.join(resolvedOut, "profiles-index.json")
-    await fs.writeFile(
+    await fsp.writeFile(
       indexPath,
       JSON.stringify(
         {
@@ -471,7 +508,7 @@ async function loadCrawlSkipFolderSet(
   if (!skipFile || skipFile.startsWith("--")) return new Set()
   const abs = path.resolve(skipFile)
   try {
-    const raw = await fs.readFile(abs, "utf-8")
+    const raw = await fsp.readFile(abs, "utf-8")
     const j = JSON.parse(raw) as { moleculeFolders?: unknown }
     const arr = j.moleculeFolders
     if (!Array.isArray(arr)) return new Set()
@@ -530,7 +567,7 @@ async function cmdCrawl(): Promise<void> {
     delayMs: parseDelayMs(),
     writeIndex: process.argv.includes("--index"),
     onlySaveCompetent: !process.argv.includes("--save-all"),
-    banner: "crawl: profile batch then data-bundle (same --output-dir).",
+    banner: "crawl: profiles → data-bundle → aggregate-links → crawl-links → nitter.",
     skipFolderNames,
   })
 
@@ -543,6 +580,172 @@ async function cmdCrawl(): Promise<void> {
     dryRun: process.argv.includes("--dry-run"),
     skipFolderNames,
   })
+
+  process.stderr.write(`Aggregating links from JSON under ${outDir}\n`)
+
+  await runAggregateLinks(aggregateLinksOptions(outDir))
+
+  if (process.argv.includes("--no-crawl-links")) {
+    process.stderr.write(`Skipping crawl-links (--no-crawl-links)\n`)
+    return
+  }
+
+  process.stderr.write(`Crawling links.json under ${outDir}\n`)
+  runCrawlLinks(outDir)
+
+  if (!process.argv.includes("--no-crawl-nitter")) {
+    process.stderr.write(`Fetching nitter timelines under ${outDir}\n`)
+    runCrawlNitter(outDir)
+  } else {
+    process.stderr.write(`Skipping crawl-nitter (--no-crawl-nitter)\n`)
+  }
+}
+
+async function cmdAggregateLinks(): Promise<void> {
+  const rawDir = getFlag("--ipnfts-dir")
+  if (!rawDir || rawDir.startsWith("--")) {
+    usage()
+    process.exit(1)
+  }
+  await runAggregateLinks(aggregateLinksOptions(resolveCrawlersDirArg(rawDir)))
+}
+
+function buildCrawlLinksArgs(ipnftsDir: string): string[] {
+  const args = [
+    path.join(process.cwd(), "crawl_links.py"),
+    "--ipnfts-dir",
+    ipnftsDir,
+  ]
+
+  const folder = getFlag("--folder")
+  if (folder) args.push("--folder", folder)
+
+  const max = getFlag("--max")
+  if (max) args.push("--max", max)
+
+  const concurrency = getFlag("--concurrency")
+  if (concurrency) args.push("--concurrency", concurrency)
+
+  const docMaxDepth = getFlag("--doc-max-depth")
+  if (docMaxDepth) args.push("--doc-max-depth", docMaxDepth)
+
+  const docMaxPages = getFlag("--doc-max-pages")
+  if (docMaxPages) args.push("--doc-max-pages", docMaxPages)
+
+  const minChars = getFlag("--min-chars")
+  if (minChars) args.push("--min-chars", minChars)
+
+  const minSectionChars = getFlag("--min-section-chars")
+  if (minSectionChars) args.push("--min-section-chars", minSectionChars)
+
+  const hubMinChars = getFlag("--hub-min-chars")
+  if (hubMinChars) args.push("--hub-min-chars", hubMinChars)
+
+  const maxOutboundFollows = getFlag("--max-outbound-follows")
+  if (maxOutboundFollows) args.push("--max-outbound-follows", maxOutboundFollows)
+
+  const spaWaitSec = getFlag("--spa-wait-sec")
+  if (spaWaitSec) args.push("--spa-wait-sec", spaWaitSec)
+
+  const skipFile = getFlag("--crawl-skip-file")
+  if (skipFile && !skipFile.startsWith("--")) {
+    args.push("--crawl-skip-file", path.resolve(skipFile))
+  }
+
+  if (process.argv.includes("--dry-run")) args.push("--dry-run")
+  if (process.argv.includes("--force")) args.push("--force")
+
+  return args
+}
+
+function runCrawlLinks(ipnftsDir: string): void {
+  const py = resolveAgentPython()
+  const args = buildCrawlLinksArgs(ipnftsDir)
+  const r = spawnSync(py, args, {
+    cwd: process.cwd(),
+    stdio: "inherit",
+    env: process.env,
+  })
+  if (r.error) {
+    console.error(r.error)
+    process.exit(1)
+  }
+  const code = typeof r.status === "number" ? r.status : 1
+  if (code !== 0) process.exit(code)
+}
+
+async function cmdCrawlLinks(): Promise<void> {
+  const rawDir = getFlag("--ipnfts-dir")
+  if (!rawDir || rawDir.startsWith("--")) {
+    usage()
+    process.exit(1)
+  }
+  runCrawlLinks(resolveCrawlersDirArg(rawDir))
+}
+
+function appendSharedPythonCrawlFlags(args: string[]): void {
+  const folder = getFlag("--folder")
+  if (folder) args.push("--folder", folder)
+
+  const max = getFlag("--max")
+  if (max) args.push("--max", max)
+
+  const concurrency = getFlag("--concurrency")
+  if (concurrency) args.push("--concurrency", concurrency)
+
+  const skipFile = getFlag("--crawl-skip-file")
+  if (skipFile && !skipFile.startsWith("--")) {
+    args.push("--crawl-skip-file", path.resolve(skipFile))
+  }
+
+  if (process.argv.includes("--dry-run")) args.push("--dry-run")
+  if (process.argv.includes("--force")) args.push("--force")
+}
+
+function runPythonCrawler(script: string, ipnftsDir: string, extraArgs: string[] = []): void {
+  const py = resolveAgentPython()
+  const args = [
+    path.join(process.cwd(), script),
+    "--ipnfts-dir",
+    ipnftsDir,
+    ...extraArgs,
+  ]
+  appendSharedPythonCrawlFlags(args)
+  const r = spawnSync(py, args, {
+    cwd: process.cwd(),
+    stdio: "inherit",
+    env: process.env,
+  })
+  if (r.error) {
+    console.error(r.error)
+    process.exit(1)
+  }
+  const code = typeof r.status === "number" ? r.status : 1
+  if (code !== 0) process.exit(code)
+}
+
+function buildCrawlNitterExtraArgs(): string[] {
+  const extra: string[] = []
+  const maxTweets = getFlag("--max-tweets")
+  if (maxTweets) extra.push("--max-tweets", maxTweets)
+  const base = getFlag("--nitter-base")
+  if (base) extra.push("--nitter-base", base)
+  const fallbacks = getFlag("--nitter-fallback-bases")
+  if (fallbacks) extra.push("--nitter-fallback-bases", fallbacks)
+  return extra
+}
+
+function runCrawlNitter(ipnftsDir: string): void {
+  runPythonCrawler("crawl_nitter.py", ipnftsDir, buildCrawlNitterExtraArgs())
+}
+
+async function cmdCrawlNitter(): Promise<void> {
+  const rawDir = getFlag("--ipnfts-dir")
+  if (!rawDir || rawDir.startsWith("--")) {
+    usage()
+    process.exit(1)
+  }
+  runCrawlNitter(resolveCrawlersDirArg(rawDir))
 }
 
 const cmd = process.argv[2]
@@ -579,6 +782,12 @@ try {
     await cmdCrawl()
   } else if (cmd === "orchestrate-profiles") {
     await cmdOrchestrateProfiles()
+  } else if (cmd === "aggregate-links") {
+    await cmdAggregateLinks()
+  } else if (cmd === "crawl-links") {
+    await cmdCrawlLinks()
+  } else if (cmd === "crawl-nitter") {
+    await cmdCrawlNitter()
   } else {
     usage()
     process.exit(1)

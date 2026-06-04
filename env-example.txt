@@ -1,5 +1,37 @@
-VLLM_BASE_URL=http://localhost:8000/v1
-VLLM_API_KEY=none
+LLM_BASE_URL=http://localhost:8000/v1
+LLM_API_KEY=none
+LLM_MODEL=/model
+TAGGER_BASE_URL=http://localhost:8002/v1
+TAGGER_API_KEY=none
+TAGGER_MODEL=/model
+VISION_MODEL_URL=http://localhost:8001/v1
+VISION_MODEL_API_KEY=none
+READ_PAPER_MODEL=nanonets/Nanonets-OCR2-3B
+# Set LLM_ENABLE_THINKING=true if your review model uses chain-of-thought (OpenAlex grounding respects this; risk search forces no-thinking).
+# LLM_ENABLE_THINKING=true
+OPENALEX_EMAIL=team@descai.org
+# Proposals use the same LLM_* / TAGGER_* as articles (proposals/llm_env.py).
+# Published review.json scores are integers 0-100 (ceil); categories are score + rationale only.
+# BioAssay-NLG: clone https://github.com/DeScAI-Team/BioAssay-NLG to compounds/BioAssay-NLG/
+# DISCOVER_TIMEOUT=20
+# DISCOVER_MAX_HTTP_CALLS=80
+# Deprecated aliases (articles/compounds fall back to these when LLM_* unset):
+# VLLM_BASE_URL=http://localhost:8000/v1
+# VLLM_API_KEY=none
 VALIDATOR_MODEL=/model
+CLASSIFIER_MODEL=
 AGENT_WALLET=
 MOLECULE_API_KEY=
+
+# Pipeline snapshot → private Cloudflare R2 (python -m snapshotter)
+# Create an R2 API token with Object Read & Write on the bucket.
+SNAPSHOT_R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
+SNAPSHOT_R2_BUCKET=your-bucket-name
+SNAPSHOT_R2_ACCESS_KEY_ID=
+SNAPSHOT_R2_SECRET_ACCESS_KEY=
+# S3 API region for boto3 (R2 uses auto)
+SNAPSHOT_R2_REGION=auto
+# Object key prefix (default crawl-snapshots)
+# SNAPSHOT_R2_PREFIX=crawl-snapshots
+# Presigned GET URL lifetime in seconds after upload (default 604800 = 7 days; 0 = no presign)
+# SNAPSHOT_PRESIGN_EXPIRY_SEC=604800

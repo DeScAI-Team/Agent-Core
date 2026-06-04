@@ -79,21 +79,32 @@ articles/
 
 ## Configuration
 
-All LLM steps share the same environment variables. Set via `.env` in the repo root.
+Set via `.env` in the repo root (`articles/llm_env.py` loads it). Three endpoints:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VLLM_BASE_URL` | `http://localhost:8000/v1` | vLLM OpenAI API base URL |
-| `VLLM_API_KEY` | `none` | API key if required by the server |
-| `VALIDATOR_MODEL` | `mixtral-8x7b-instruct` | Model id used across all LLM steps |
-| `CLASSIFIER_MODEL` | (same as `VALIDATOR_MODEL`) | Optional override for step 4 |
+| `LLM_BASE_URL` / `LLM_API_KEY` | `:8000` | Review LLM (extract, validate, evidence, screener, score) |
+| `LLM_MODEL` / `VALIDATOR_MODEL` | `/model` | Review model id (`VALIDATOR_MODEL` is a deprecated alias) |
+| `TAGGER_BASE_URL` / `TAGGER_API_KEY` | falls back to `LLM_*` | Claim classification + heading labels (`classify_claims`, `add_data`) |
+| `TAGGER_MODEL` | auto / `CLASSIFIER_MODEL` | Tagger model id |
+| `VISION_MODEL_URL` / `VISION_MODEL_API_KEY` | `:8001` | PDF OCR (`read-paper.py`) |
+| `READ_PAPER_MODEL` | `nanonets/Nanonets-OCR2-3B` | Vision OCR model id |
 | `VALIDATOR_CONCURRENCY` | `15` | Max concurrent validation requests (step 3) |
+
+## Output layout (`run_full_pipeline.py`)
+
+Per paper under `reviews/articles/<pdf_stem>/`:
+
+- `steps/` — `full.md`, knowledge base, claim JSONL, triage/retrieve caches, screener, originality
+- `review/` — `review.json`, `overview.json`, `evidence_audit.md`
+
+Standalone `empirical-pipe.py` into `articles/data/` may still use title-derived folders and legacy `output/` unless `--run-dir` is passed.
 
 ## Key outputs
 
 | File | Description |
 |------|-------------|
-| `review.json` | Final structured review: per-dimension scores, `composite_score`, rationales, review statement |
+| `review.json` | Final review: `composite_score` and per-category `score` as **integers 0–100** (ceil); each category has `score` + `rationale` only (empty rationales omitted) |
 | `overview.json` | Plain-language companion (when LLM overview is enabled in `score.py`) |
 | `evidence_audit.md` | Human-readable audit trail: provenance, scores, claim/citation trace, screener quotes, originality |
 

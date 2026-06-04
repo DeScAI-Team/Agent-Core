@@ -22,18 +22,19 @@ Reads the JSON output of ``interactions.py`` and calls the LLM four times:
 
 Output is written as ``<repo>/reviews/compounds/<combination>/<combination>-combo-review.json``
 by default, or to a path supplied via ``-o``. The JSON shape matches article ``overview.json``
-(fewer fields): ``research_name``, ``review_date``, ``composite_score`` (0–100),
+(fewer fields): ``compound_token``, ``review_date``, ``composite_score`` (0–100),
 ``review_statement`` (with a ``Compound(s): …`` prefix), and ``categories`` with
 percent scores (0–100) plus rationales.
 
 Usage:
-  python review-multiple.py pump-science/data/omipa-ginse-uroli.json
+  python review-multiple.py reviews/compounds/OMIGU/steps/omipa-ginse-uroli-bundle.json
   python review-multiple.py bundle.json -o my-review.json --model mixtral-8x7b-instruct
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -41,20 +42,22 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
+import sys
 
 from openai import OpenAI, RateLimitError
+
+_COMPOUNDS_DIR = Path(__file__).resolve().parents[2]
+if str(_COMPOUNDS_DIR) not in sys.path:
+    sys.path.insert(0, str(_COMPOUNDS_DIR))
+from llm_env import LLM_BASE_URL, LLM_API_KEY  # noqa: E402
 
 
 def get_available_model(client: OpenAI, env_var_name: str, fallback_env_vars: list[str]) -> str:
     """
-    Discover available model from vLLM server or environment variables.
-    
+    Discover available model from the LLM server or environment variables.
+
     Priority:
-    1. Query vLLM /v1/models endpoint
+    1. Query /v1/models endpoint
     2. Check env_var_name (e.g., TAGGER_MODEL, REVIEWER_MODEL)
     3. Check fallback_env_vars (e.g., CLASSIFIER_MODEL, VALIDATOR_MODEL)
     4. Raise error with helpful message
@@ -67,7 +70,7 @@ def get_available_model(client: OpenAI, env_var_name: str, fallback_env_vars: li
             print(f"  Auto-discovered model: {model_id}", file=sys.stderr)
             return model_id
     except Exception as e:
-        print(f"  Could not auto-discover models from vLLM: {e}", file=sys.stderr)
+        print(f"  Could not auto-discover models from LLM server: {e}", file=sys.stderr)
     
     # Fallback to environment variables
     for env_name in [env_var_name] + fallback_env_vars:
@@ -79,9 +82,9 @@ def get_available_model(client: OpenAI, env_var_name: str, fallback_env_vars: li
     # No model found - provide helpful error
     env_list = ", ".join([env_var_name] + fallback_env_vars)
     raise ValueError(
-        f"No model specified and could not auto-discover from vLLM.\n"
+        f"No model specified and could not auto-discover from LLM server.\n"
         f"Please set one of these environment variables: {env_list}\n"
-        f"Or ensure vLLM is running at {os.environ.get('VLLM_BASE_URL', 'http://localhost:8000/v1')}"
+        f"Or ensure the LLM server is running at {LLM_BASE_URL}"
     )
 
 
@@ -92,12 +95,6 @@ _PROMPT_GROUNDING = PROMPTS_DIR / "pump-science-combination-scientific-grounding
 _PROMPT_RISK = PROMPTS_DIR / "pump-science-combination-risk-statement-evaluation.md"
 _PROMPT_COMPAT = PROMPTS_DIR / "pump-science-compatibility-evaluation.md"
 _PROMPT_STATEMENT = PROMPTS_DIR / "pump-science-combination-review-statement-evaluation.md"
-
-if load_dotenv is not None:
-    load_dotenv(REPO_ROOT / ".env")
-
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
 
 DEFAULT_RISK_SCORE_PCT = 25.0
 
@@ -156,6 +153,11 @@ def call_llm(client: OpenAI, model: str, system_prompt: str, user_content: str) 
         {"role": "user", "content": user_content},
     ]
 
+    extra_body: dict[str, object] = {
+        "top_k": -1,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
     def _complete() -> object:
         kw: dict[str, object] = dict(
             model=model,
@@ -167,7 +169,7 @@ def call_llm(client: OpenAI, model: str, system_prompt: str, user_content: str) 
             messages=messages,
         )
         try:
-            return client.chat.completions.create(**kw, extra_body={"top_k": -1})
+            return client.chat.completions.create(**kw, extra_body=extra_body)
         except TypeError:
             return client.chat.completions.create(**kw)
 
@@ -215,8 +217,18 @@ def _build_grounding_ctx(bundle: dict) -> dict:
     }
 
 
+def _interaction_snippets(ev: dict) -> list[str]:
+    return [
+        s for s in (
+            (iu.get("snippet") or "") for iu in (ev.get("interaction_evidence") or [])
+            if isinstance(iu, dict)
+        )
+        if isinstance(s, str) and s.strip()
+    ][:5]
+
+
 def _build_risk_ctx(bundle: dict) -> dict:
-    """Pass 2: per-compound risk rationales and SPL interaction excerpts."""
+    """Pass 2: per-compound risk rationales and SPL / tagged interaction excerpts."""
     compounds_list = []
     for name, ev in bundle.get("compounds", {}).items():
         spl = ev.get("spl") or {}
@@ -225,9 +237,13 @@ def _build_risk_ctx(bundle: dict) -> dict:
             "risk_rationale": ev.get("risk_rationale") or "",
             "spl_available": spl.get("label_matched", False),
             "spl_interaction_excerpts": spl.get("interaction_excerpts") or [],
+            "interaction_evidence": _interaction_snippets(ev),
+            "risk_tagged_count": ev.get("risk_tagged_count") or 0,
         })
     return {
         "combination_name": bundle.get("combination_name", "Unknown combination"),
+        "ticker": bundle.get("ticker"),
+        "intervention": bundle.get("intervention"),
         "compounds": compounds_list,
     }
 
@@ -238,21 +254,30 @@ def _build_compat_ctx(bundle: dict) -> dict:
     for name, ev in bundle.get("compounds", {}).items():
         spl = ev.get("spl") or {}
         kegg = ev.get("kegg") or {}
-        mechanism_snippets = [
-            mu.get("snippet") for mu in (ev.get("mechanism_units") or [])
-            if mu.get("snippet")
-        ][:5]  # cap at 5 snippets per compound to keep context tractable
+        mechanism_snippets: list[str] = []
+        for summary in ev.get("longevity_topic_summaries") or []:
+            if isinstance(summary, dict):
+                for bullet in summary.get("bullets") or []:
+                    if isinstance(bullet, str) and bullet.strip():
+                        mechanism_snippets.append(bullet.strip())
+        for mu in ev.get("longevity_evidence") or ev.get("mechanism_units") or []:
+            if isinstance(mu, dict) and mu.get("snippet"):
+                mechanism_snippets.append(str(mu["snippet"]))
+        mechanism_snippets = mechanism_snippets[:8]
         compounds_list.append({
             "compound_name": name,
             "kegg_flags_present": kegg.get("flags_present") or [],
             "spl_available": spl.get("label_matched", False),
             "spl_interaction_excerpts": spl.get("interaction_excerpts") or [],
             "mechanism_snippets": mechanism_snippets,
+            "interaction_evidence": _interaction_snippets(ev),
         })
 
     xref = bundle.get("cross_reference") or {}
     return {
         "combination_name": bundle.get("combination_name", "Unknown combination"),
+        "ticker": bundle.get("ticker"),
+        "intervention": bundle.get("intervention"),
         "compounds": compounds_list,
         "cross_reference": {
             "shared_pathways": xref.get("shared_pathways") or [],
@@ -288,8 +313,10 @@ def _build_statement_ctx(
 
     return {
         "combination_name": bundle.get("combination_name", "Unknown combination"),
+        "ticker": bundle.get("ticker"),
+        "intervention": bundle.get("intervention"),
         "compounds": compounds_scores,
-        "total_units": None,       # not available from evidence bundle; prompt handles null
+        "total_units": None,
         "coverage": coverage_union or None,
         "scientific_grounding": grounding_text,
         "risk": risk_text,
@@ -301,12 +328,15 @@ def _build_statement_ctx(
 # Output helpers
 # ---------------------------------------------------------------------------
 
-def _default_output_path(in_path: Path, combination_name: str) -> Path:
-    safe = re.sub(r'[<>:"/\\|?*]', "_", combination_name).strip().replace(" ", "-")[:80]
-    # Output to reviews/compounds/<combination>/ instead of data/
-    reviews_dir = REPO_ROOT.parent / "reviews" / "compounds" / safe
-    reviews_dir.mkdir(parents=True, exist_ok=True)
-    return reviews_dir / f"{safe}-combo-review.json"
+def _default_output_path(in_path: Path, combination_name: str, run_root: Path | None = None) -> Path:
+    if run_root is not None:
+        review_dir = run_root / "review"
+    else:
+        # bundle lives in steps/
+        steps = in_path.parent
+        review_dir = steps.parent / "review" if steps.name == "steps" else steps / "review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    return review_dir / "review.json"
 
 
 def _avg_score(bundle: dict, field: str) -> float | None:
@@ -326,6 +356,19 @@ def _fraction_to_percent(value: float | None) -> float | None:
     if v <= 1.0:
         v *= 100.0
     return round(v, 2)
+
+
+def _score_percent_int(value: float) -> int:
+    return int(math.ceil(float(value)))
+
+
+def _combo_compound_token(bundle: dict[str, Any], compound_names: list[str]) -> str:
+    """Display id for combo reviews, e.g. ``OMIGU (Omipalisib + Ginsenoside Rh2 + Urolithin A)``."""
+    joined = " + ".join(compound_names)
+    ticker = str(bundle.get("ticker") or "").strip()
+    if ticker:
+        return f"{ticker} ({joined})"
+    return joined
 
 
 def _compound_subject_line(names: list[str]) -> str:
@@ -370,6 +413,71 @@ def _mean_of_numbers(values: list[float | None]) -> float | None:
     return round(sum(nums) / len(nums), 2)
 
 
+def _stitched_per_compound_rationales(
+    bundle: dict,
+    rationale_key: str,
+    score_key: str,
+) -> str:
+    """Deterministic fallback when combination LLM returns empty text."""
+    blocks: list[str] = []
+    compounds = bundle.get("compounds")
+    if not isinstance(compounds, dict):
+        return ""
+    for name in sorted(compounds.keys()):
+        ev = compounds[name]
+        if not isinstance(ev, dict):
+            continue
+        rat = (ev.get(rationale_key) or "").strip()
+        if not rat:
+            continue
+        score = ev.get(score_key)
+        if score is not None:
+            blocks.append(f"{name} (score {score}): {rat}")
+        else:
+            blocks.append(f"{name}: {rat}")
+    return "\n\n".join(blocks)
+
+
+def _llm_text_or_fallback(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    ctx_json: str,
+    fallback: str,
+    label: str,
+) -> str:
+    text = call_llm(client, model, prompt, ctx_json).strip()
+    if text:
+        return text
+    fb = fallback.strip()
+    if fb:
+        print(
+            f"  WARN: {label} LLM returned empty; using per-compound rationales from bundle.",
+            file=sys.stderr,
+        )
+        return fb
+    print(f"  WARN: {label} LLM returned empty and no bundle fallback available.", file=sys.stderr)
+    return ""
+
+
+def _fallback_review_statement(bundle: dict, compound_names: list[str]) -> str:
+    parts: list[str] = []
+    compounds = bundle.get("compounds")
+    if isinstance(compounds, dict):
+        for name in compound_names:
+            ev = compounds.get(name)
+            if not isinstance(ev, dict):
+                continue
+            stmt = (ev.get("review_statement") or "").strip()
+            if stmt:
+                parts.append(stmt)
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return " ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -396,11 +504,18 @@ def main() -> int:
         help="Output JSON path (default: <repo>/reviews/compounds/<combination>/<combination>-combo-review.json).",
     )
     parser.add_argument(
+        "--run-root",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Run root reviews/compounds/<TICKER>/ (default: inferred from bundle path).",
+    )
+    parser.add_argument(
         "--model",
         type=str,
         default=None,
         metavar="NAME",
-        help="Model id to use (default: auto-discovered from vLLM or REVIEWER_MODEL/TAGGER_MODEL/CLASSIFIER_MODEL/VALIDATOR_MODEL env vars).",
+        help="Model id (default: auto-discovered or REVIEWER_MODEL/TAGGER_MODEL/CLASSIFIER_MODEL/VALIDATOR_MODEL).",
     )
     args = parser.parse_args()
 
@@ -436,7 +551,7 @@ def main() -> int:
     compat_prompt = _PROMPT_COMPAT.read_text(encoding="utf-8")
     statement_prompt = _PROMPT_STATEMENT.read_text(encoding="utf-8")
 
-    client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
+    client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
     
     # Discover model
     model = args.model or get_available_model(
@@ -445,18 +560,33 @@ def main() -> int:
         ["TAGGER_MODEL", "CLASSIFIER_MODEL", "VALIDATOR_MODEL"]
     )
 
+    grounding_fb = _stitched_per_compound_rationales(
+        bundle, "scientific_grounding_rationale", "scientific_grounding_score"
+    )
+    risk_fb = _stitched_per_compound_rationales(bundle, "risk_rationale", "risk_score")
+
     # ---- Pass 1: combined scientific grounding ----
     print("  [1/4] Generating combined scientific_grounding...", file=sys.stderr)
     grounding_ctx = _build_grounding_ctx(bundle)
-    grounding_text = call_llm(
-        client, model, grounding_prompt, json.dumps(grounding_ctx, ensure_ascii=False)
+    grounding_text = _llm_text_or_fallback(
+        client,
+        model,
+        grounding_prompt,
+        json.dumps(grounding_ctx, ensure_ascii=False),
+        grounding_fb,
+        "scientific_grounding",
     )
 
     # ---- Pass 2: combined risk statement ----
     print("  [2/4] Generating combined risk statement...", file=sys.stderr)
     risk_ctx = _build_risk_ctx(bundle)
-    risk_text = call_llm(
-        client, model, risk_prompt, json.dumps(risk_ctx, ensure_ascii=False)
+    risk_text = _llm_text_or_fallback(
+        client,
+        model,
+        risk_prompt,
+        json.dumps(risk_ctx, ensure_ascii=False),
+        risk_fb,
+        "risk_assessment",
     )
 
     # ---- Pass 3: compatibility ----
@@ -464,27 +594,36 @@ def main() -> int:
     compat_ctx = _build_compat_ctx(bundle)
     compat_text = call_llm(
         client, model, compat_prompt, json.dumps(compat_ctx, ensure_ascii=False)
-    )
+    ).strip()
     if not compat_text:
         compat_text = (
-            "Compatibility assessment could not be generated. "
-            "Inspect the evidence bundle for cross-reference data."
+            "Compatibility assessment could not be generated from the LLM. "
+            "Inspect shared_pathways and explicit_mentions in the evidence bundle."
         )
+        print("  WARN: compatibility LLM returned empty; using placeholder.", file=sys.stderr)
 
     # ---- Pass 4: combined review statement ----
     print("  [4/4] Generating combined review_statement...", file=sys.stderr)
     statement_ctx = _build_statement_ctx(bundle, grounding_text, risk_text, compat_text)
     review_statement = call_llm(
         client, model, statement_prompt, json.dumps(statement_ctx, ensure_ascii=False)
-    )
+    ).strip()
+    if not review_statement:
+        review_statement = _fallback_review_statement(bundle, compound_names)
+        if review_statement:
+            print(
+                "  WARN: review_statement LLM returned empty; stitched from per-compound statements.",
+                file=sys.stderr,
+            )
 
     _now = datetime.now(timezone.utc)
     review_date = f"{_now.strftime('%B')} {_now.day}, {_now.year}"
 
+    run_root = args.run_root.expanduser().resolve() if args.run_root else None
     out_path: Path = (
         args.output.expanduser().resolve()
         if args.output is not None
-        else _default_output_path(in_path, combination_name)
+        else _default_output_path(in_path, combination_name, run_root=run_root)
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -495,28 +634,31 @@ def main() -> int:
     compat_pct = _compatibility_percent_score(bundle)
     compat_rationale = _compat_signal_preamble(bundle) + (compat_text or "").strip()
 
-    composite = _mean_of_numbers([sg_pct, risk_pct, compat_pct])
+    composite_raw = _mean_of_numbers([sg_pct, risk_pct, compat_pct])
+    composite = int(math.ceil(composite_raw)) if composite_raw is not None else None
 
     subject = _compound_subject_line(compound_names)
     stmt = (review_statement or "").strip()
     review_statement_out = f"{subject} {stmt}".strip() if stmt else subject
 
+    compound_token = _combo_compound_token(bundle, compound_names)
+
     review = {
-        "research_name": combination_name,
+        "compound_token": compound_token,
         "review_date": review_date,
         "composite_score": composite,
         "review_statement": review_statement_out,
         "categories": {
             "scientific_grounding": {
-                "score": sg_pct,
+                "score": _score_percent_int(sg_pct) if sg_pct is not None else 50,
                 "rationale": grounding_text,
             },
             "risk_assessment": {
-                "score": risk_pct,
+                "score": _score_percent_int(risk_pct),
                 "rationale": risk_text,
             },
             "compatibility": {
-                "score": compat_pct,
+                "score": _score_percent_int(compat_pct),
                 "rationale": compat_rationale,
             },
         },

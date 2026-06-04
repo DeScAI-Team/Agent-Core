@@ -64,14 +64,15 @@ python run_e2e_pipeline.py --upload   # optional step 9: Arweave upload of data/
 
 ## Configuration — local vLLM (OpenAI-compatible)
 
-Set via environment variables or a `.env` file in the project root. **Steps 1, 3, 4, 5, and 8** send LLM traffic to `VLLM_BASE_URL` (same server; use `VALIDATOR_MODEL` for the served model name unless you override per step).
+Set via environment variables or a `.env` file in the project root. See `env-example.txt`. Articles use three endpoints via `articles/llm_env.py`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VLLM_BASE_URL` | `http://localhost:8000/v1` | vLLM OpenAI API base URL |
-| `VLLM_API_KEY` | `none` | API key sent to vLLM (use `none` or empty if your server does not require one) |
-| `VALIDATOR_MODEL` | `mixtral-8x7b-instruct` | Model id for heading classification (step 1), claim extraction (step 3), validation (step 4), and fallback for step 5 |
-| `CLASSIFIER_MODEL` | (same as `VALIDATOR_MODEL`) | Optional override for step 5 only |
+| `LLM_BASE_URL` / `LLM_API_KEY` | `:8000` | Review LLM (`VLLM_*` deprecated alias) |
+| `LLM_MODEL` / `VALIDATOR_MODEL` | `/model` | Review model id |
+| `TAGGER_BASE_URL` / `TAGGER_MODEL` | `:8002` or LLM | Claim tags + section headings |
+| `VISION_MODEL_URL` / `READ_PAPER_MODEL` | `:8001` | PDF OCR |
+| `CLASSIFIER_MODEL` | (tagger fallback) | Optional override for claim classification |
 | `VALIDATOR_CONCURRENCY` | `15` | Max concurrent async validation requests (step 4 only) |
 | `VALIDATOR_KEY_SECTION_MAX_CHARS` | `24000` | Max chars of context injected per claim validation prompt (step 4) |
 | `VALIDATOR_SOURCE_CHUNKS` | `text_knowledge_base.jsonl` | Source chunks file for building per-claim validation context (step 4) |

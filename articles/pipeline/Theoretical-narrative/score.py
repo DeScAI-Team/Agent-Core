@@ -31,9 +31,19 @@ PROMPTS_DIR = _BASE / "prompts"
 sys.path.insert(0, str(_BASE))
 from prep import compute_evidence_score, SCORE_EXCLUDED_GRADES  # noqa: E402
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-MODEL = os.environ.get("VALIDATOR_MODEL", "/model")
+import sys
+from pathlib import Path as _Path
+_ARTICLES = _Path(__file__).resolve().parents[2]
+_PIPELINE = _Path(__file__).resolve().parents[1]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+if str(_PIPELINE) not in sys.path:
+    sys.path.insert(0, str(_PIPELINE))
+from llm_env import LLM_API_KEY, LLM_BASE_URL  # noqa: E402
+from publish_review import publish_categories, publish_composite  # noqa: E402
+VLLM_BASE_URL = LLM_BASE_URL
+VLLM_API_KEY = LLM_API_KEY
+MODEL = os.environ.get("LLM_MODEL") or os.environ.get("VALIDATOR_MODEL", "/model")
 
 MAX_RETRIES = 4
 STATEMENT_MAX_TOKENS = 4096
@@ -412,19 +422,24 @@ def main() -> None:
                     "rationale": cat.get("rationale", ""),
                 }
 
-    print(f"  {len(all_scores)} categories in final review", file=stderr)
+    print(f"  {len(all_scores)} categories merged (pre-publish)", file=stderr)
 
     # Stage 5
     print("\n=== Stage 5: composite score ===", file=stderr)
-    composite = compute_composite(all_scores, dimension_weights)
-    print(f"  composite_score = {composite}", file=stderr)
+    published_categories = publish_categories(all_scores)
+    composite = publish_composite(all_scores, dimension_weights, compute_composite)
+    print(
+        f"  composite_score = {composite}  "
+        f"({len(published_categories)} published categories)",
+        file=stderr,
+    )
 
     review_obj: dict[str, Any] = {
         "research_name": review.get("research_name", ""),
         "review_date": review.get("review_date", ""),
         "composite_score": composite,
         "review_statement": review.get("review_statement", ""),
-        "categories": all_scores,
+        "categories": published_categories,
     }
 
     client: OpenAI | None = None

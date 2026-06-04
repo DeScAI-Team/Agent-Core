@@ -28,11 +28,13 @@ All pipeline intermediates live under:
 
 Published artifacts:
 
-  <output-dir>/<research-folder>/output/review.json
-  <output-dir>/<research-folder>/output/overview.json
-  <output-dir>/<research-folder>/output/evidence_audit.md
+  <output-dir>/<research-folder>/review/review.json  (legacy: .../output/)
+  <output-dir>/<research-folder>/review/overview.json
+  <output-dir>/<research-folder>/review/evidence_audit.md
 
-Environment: VLLM_BASE_URL, VLLM_API_KEY; --model sets VALIDATOR_MODEL.
+With ``--run-dir``: ``<run-dir>/steps/`` and ``<run-dir>/review/``.
+
+Environment: LLM_BASE_URL, LLM_API_KEY; --model sets review LLM.
 """
 
 from __future__ import annotations
@@ -50,6 +52,14 @@ _THEORETICAL = Path(__file__).resolve().parent
 _PIPELINE = _THEORETICAL.parent
 _CLAIM_EXTRACT = _PIPELINE / "claim-extract"
 _REPO_ROOT = _PIPELINE.parent.parent
+_ARTICLES = _PIPELINE.parent
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+if str(_PIPELINE) not in sys.path:
+    sys.path.insert(0, str(_PIPELINE))
+from llm_env import pipeline_env  # noqa: E402
+from run_layout import copy_into_steps  # noqa: E402
+
 DEFAULT_OUTPUT_DIR = _REPO_ROOT / "articles" / "data"
 MAPPINGS = _PIPELINE / "mappings.json"
 PY = sys.executable
@@ -170,6 +180,12 @@ def main() -> None:
         help=f"Parent directory for the run folder (default: {DEFAULT_OUTPUT_DIR})",
     )
     parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Fixed run root (reviews/articles/<pdf_stem>/); uses steps/ + review/",
+    )
+    parser.add_argument(
         "--from-step", type=int, default=1, choices=range(1, 14),
         help="Start step (1=spacy ... 5=group, 6=triage, 7=retrieve, 8=prep, "
              "9=review, 10=originality, 11=screener, 12=score, 13=evidence-doc)",
@@ -183,7 +199,6 @@ def main() -> None:
     args = parser.parse_args()
 
     input_dir = args.input_dir.expanduser().resolve()
-    output_parent = args.output_dir.expanduser().resolve()
     start = args.from_step
 
     kb_src = resolve_text_knowledge_base(input_dir, args.kb)
@@ -194,30 +209,35 @@ def main() -> None:
         print(f"error: missing full.md: {fullmd_src}", file=sys.stderr)
         sys.exit(1)
 
-    grouped_for_title = grouped_src if grouped_src.is_file() else None
-    folder_key = resolve_run_folder_name(input_dir, kb_src, grouped_for_title, fullmd_src)
-    run_dir = output_parent / folder_key
-    if not args.overwrite:
-        run_dir = _unique_run_dir(run_dir)
+    if args.run_dir is not None:
+        run_dir = args.run_dir.expanduser().resolve()
+        folder_key = run_dir.name
+        steps_dir = run_dir / "steps"
+        review_dir = run_dir / "review"
+    else:
+        output_parent = args.output_dir.expanduser().resolve()
+        grouped_for_title = grouped_src if grouped_src.is_file() else None
+        folder_key = resolve_run_folder_name(input_dir, kb_src, grouped_for_title, fullmd_src)
+        run_dir = output_parent / folder_key
+        if not args.overwrite:
+            run_dir = _unique_run_dir(run_dir)
+        steps_dir = run_dir / "steps"
+        review_dir = run_dir / "output"
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    steps_dir = run_dir / "steps"
-    output_dir = run_dir / "output"
     steps_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    review_dir.mkdir(parents=True, exist_ok=True)
 
     kb_dest = steps_dir / "text_knowledge_base.jsonl"
     full_md = steps_dir / "full.md"
     grouped = steps_dir / "grouped.json"
 
-    if not kb_dest.is_file() or start == 1:
-        shutil.copy2(kb_src, kb_dest)
-    if not full_md.is_file() or start == 1:
-        shutil.copy2(fullmd_src, full_md)
+    copy_into_steps(kb_src, kb_dest, refresh=start == 1)
+    copy_into_steps(fullmd_src, full_md, refresh=start == 1)
 
     if start >= 6 and not grouped.is_file():
         if grouped_src.is_file():
-            shutil.copy2(grouped_src, grouped)
+            copy_into_steps(grouped_src, grouped)
         else:
             print(
                 "error: --from-step >= 6 requires grouped.json in steps/ or under --input-dir",
@@ -229,7 +249,7 @@ def main() -> None:
     print(f"Run directory: {run_dir}")
     print(f"Using knowledge base: {kb_src}")
 
-    base_env = {**os.environ, "VALIDATOR_MODEL": args.model}
+    base_env = pipeline_env(model=args.model)
     ce_env = {**base_env, "CLAIM_EXTRACT_DATA_DIR": str(steps_dir.resolve())}
     use_llm = not args.skip_llm
 
@@ -308,7 +328,7 @@ def main() -> None:
             env=base_env,
         )
 
-    review_out = output_dir / "review.json"
+    review_out = review_dir / "review.json"
     if start <= 9:
         run_step(
             "Step 9/13 — Review (rationales)",
@@ -378,7 +398,7 @@ def main() -> None:
                 "--retrieve", str(rc_out),
                 "--screener", str(screener_out),
                 "--originality", str(originality_out),
-                "-o", str(output_dir / "evidence_audit.md"),
+                "-o", str(review_dir / "evidence_audit.md"),
             ],
             env=base_env,
         )
@@ -387,7 +407,7 @@ def main() -> None:
     print("  PIPELINE COMPLETE")
     print(f"  Run directory: {run_dir}")
     print(f"  Intermediates: {steps_dir}")
-    print(f"  Published:     {output_dir}")
+    print(f"  Published:     {review_dir}")
     print(f"{'='*60}")
 
 

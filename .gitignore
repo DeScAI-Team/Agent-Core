@@ -4,6 +4,9 @@
 !.env.example
 !**/.env.example
 
+# Optional clone of BioAssay-NLG (see compounds/README.md)
+compounds/BioAssay-NLG/
+
 # Arweave wallet keyfiles (any path)
 arweave-keyfile-*.json
 
@@ -39,8 +42,6 @@ Agent/
 # data
 articles/data/*
 !articles/data/.gitkeep
-compounds/data/*
-!compounds/data/.gitkeep
 proposals/data/*
 !proposals/data/.gitkeep
 reviews/
@@ -57,7 +58,8 @@ crawlers/pump-science/*
 articles/CHANGES_self_reported_grading.md
 articles/review_example.txt
 articles/TRIAGE_NOISE_FILTERING_2026_05_01.md
-compounds/test_trio.ps1
+compounds/data/*
+!compounds/data/.gitkeep
 debug-c060aa.log
 debug-dca913.log
 
@@ -73,4 +75,17 @@ articles/article_uploader/test.txt
 
 test-data/
 
-full-test/ 
+full-test/
+
+# Pipeline snapshotter (python -m snapshotter)
+snapshot.tar.zst
+snapshot-receipt.json
+.snapshot-tmp.tar
+
+# Local smoke-test scripts (not part of the repo)
+test_review_pipelines.py
+test_uploader_routes.py
+
+# Archived crawl/output data
+/old
+

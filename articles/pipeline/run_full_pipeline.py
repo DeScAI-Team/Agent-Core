@@ -11,7 +11,7 @@ different vLLM models must be swapped between steps.
   Stage B (text LLM):
     python run_full_pipeline.py https://example.com/paper.pdf --from-step add_data
 
-Environment: VLLM_BASE_URL, VLLM_API_KEY, VALIDATOR_MODEL, READ_PAPER_MODEL
+Environment: LLM_* (review), TAGGER_* (claim tags), VISION_MODEL_* + READ_PAPER_MODEL (OCR).
 """
 
 from __future__ import annotations
@@ -29,32 +29,31 @@ from urllib.parse import unquote, urlparse
 import requests
 from openai import OpenAI
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None  # type: ignore[misc, assignment]
-
 _PIPELINE = Path(__file__).resolve().parent
-_REPO_ROOT = _PIPELINE.parent.parent
+_ARTICLES = _PIPELINE.parent
+_REPO_ROOT = _ARTICLES.parent
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+
+from llm_env import LLM_API_KEY, LLM_BASE_URL, pipeline_env, review_model  # noqa: E402
+from run_layout import (  # noqa: E402
+    find_run_dir,
+    run_dir_for_stem,
+    safe_stem,
+    work_dir_for_run,
+)
+
 _CLAIM_EXTRACT = _PIPELINE / "claim-extract"
 _EMPIRICAL = _PIPELINE / "empirical"
 _THEORETICAL = _PIPELINE / "Theoretical-narrative"
 _PROTOCOL = _PIPELINE / "Protocol-pre_results"
 _PROMPTS = _PIPELINE / "prompts"
 
-DEFAULT_OUTPUT_DIR = _REPO_ROOT / "articles" / "data"
+DEFAULT_OUTPUT_DIR = _REPO_ROOT / "reviews" / "articles"
 PY = sys.executable
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-
-STEPS = ("fetch", "reader", "add_data", "route", "pipeline", "upload")
+STEPS = ("fetch", "reader", "add_data", "route", "pipeline")
 STEP_INDEX = {name: i for i, name in enumerate(STEPS)}
-
-
-def _safe_stem(stem: str) -> str:
-    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem).strip(" ._-") or "document"
-    return s[:120]
 
 
 def _infer_pdf_filename(url: str, response: requests.Response) -> str:
@@ -62,18 +61,18 @@ def _infer_pdf_filename(url: str, response: requests.Response) -> str:
     if "filename=" in cd:
         match = re.search(r'filename="?([^";]+)"?', cd)
         if match:
-            return _safe_stem(Path(match.group(1)).stem) + ".pdf"
+            return safe_stem(Path(match.group(1)).stem) + ".pdf"
 
     path = urlparse(url).path
     basename = unquote(Path(path).name)
     if basename.lower().endswith(".pdf"):
-        return _safe_stem(Path(basename).stem) + ".pdf"
+        return safe_stem(Path(basename).stem) + ".pdf"
 
     return "document.pdf"
 
 
-def download_pdf(url: str, output_dir: Path) -> Path:
-    """Download a PDF from a direct URL. Returns path to saved file."""
+def download_pdf(url: str, run_dir: Path) -> Path:
+    """Download a PDF from a direct URL into run_dir. Returns path to saved file."""
     print(f"\n  Downloading PDF from: {url}")
     resp = requests.get(url, stream=True, timeout=120)
     resp.raise_for_status()
@@ -88,8 +87,8 @@ def download_pdf(url: str, output_dir: Path) -> Path:
             )
 
     filename = _infer_pdf_filename(url, resp)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    dest = output_dir / filename
+    run_dir.mkdir(parents=True, exist_ok=True)
+    dest = run_dir / filename
     with open(dest, "wb") as f:
         for chunk in resp.iter_content(chunk_size=8192):
             f.write(chunk)
@@ -107,18 +106,6 @@ def run_step(label: str, cmd: list[str], *, env: dict | None = None) -> None:
         print(f"  FAILED (exit {result.returncode})")
         sys.exit(result.returncode)
     print("  OK")
-
-
-def find_output_folder(output_dir: Path, pdf_stem: str) -> Path | None:
-    """Locate existing output folder by PDF stem match."""
-    safe = _safe_stem(pdf_stem)
-    candidate = output_dir / safe
-    if candidate.is_dir():
-        return candidate
-    for d in sorted(output_dir.iterdir()):
-        if d.is_dir() and d.name.startswith(safe):
-            return d
-    return None
 
 
 def extract_abstract_text(kb_path: Path) -> str | None:
@@ -204,44 +191,6 @@ def classify_article_type(
     return "empirical"
 
 
-def _scale_review_scores_0_to_100_inplace(data: dict) -> None:
-    """Multiply composite_score and each category score by 100 (0-1 to 0-100). Mutates data."""
-    cs = data.get("composite_score")
-    if isinstance(cs, (int, float)):
-        data["composite_score"] = float(cs) * 100.0
-
-    cats = data.get("categories")
-    if not isinstance(cats, dict):
-        return
-    for cat in cats.values():
-        if not isinstance(cat, dict):
-            continue
-        sc = cat.get("score")
-        if isinstance(sc, (int, float)):
-            cat["score"] = float(sc) * 100.0
-
-
-def scale_article_output_scores_to_percent(output_dir: Path) -> None:
-    """Scale review.json and overview.json scores from 0-1 to 0-100 before upload."""
-    for name in ("review.json", "overview.json"):
-        path = output_dir / name
-        if not path.is_file():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            print(f"  ! Warning: could not parse {path}: {e}", file=sys.stderr)
-            continue
-        if not isinstance(data, dict):
-            continue
-        _scale_review_scores_0_to_100_inplace(data)
-        path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        print(f"  Scaled scores 0-1 -> 0-100: {path.name}")
-
-
 def route_to_pipeline(
     article_type: str,
     work_dir: Path,
@@ -249,7 +198,7 @@ def route_to_pipeline(
     model: str,
     skip_llm: bool,
     overwrite: bool,
-    output_dir: Path,
+    run_dir: Path,
 ) -> None:
     """Invoke the appropriate sub-pipeline orchestrator."""
     pipe_map = {
@@ -264,7 +213,7 @@ def route_to_pipeline(
         str(script),
         "--input-dir", str(work_dir),
         "--kb", str(kb_path),
-        "--output-dir", str(output_dir),
+        "--run-dir", str(run_dir),
         "--model", model,
     ]
     if skip_llm:
@@ -275,14 +224,11 @@ def route_to_pipeline(
     run_step(
         f"Sub-pipeline: {article_type}",
         cmd,
-        env={**os.environ, "VALIDATOR_MODEL": model},
+        env=pipeline_env(model=model),
     )
 
 
 def main() -> None:
-    if load_dotenv:
-        load_dotenv(_REPO_ROOT / ".env")
-
     parser = argparse.ArgumentParser(
         description="Full pipeline: PDF URL -> read -> chunk -> classify -> review.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -314,8 +260,8 @@ Examples:
     parser.add_argument(
         "--model",
         type=str,
-        default=os.environ.get("VALIDATOR_MODEL", "/model"),
-        help="LLM model id (sets VALIDATOR_MODEL; default: env or /model)",
+        default=None,
+        help="Review LLM model id (default: LLM_MODEL or VALIDATOR_MODEL from env)",
     )
     parser.add_argument(
         "--from-step",
@@ -341,12 +287,8 @@ Examples:
         action="store_true",
         help="Overwrite existing output folder",
     )
-    parser.add_argument(
-        "--skip-upload",
-        action="store_true",
-        help="Skip Arweave upload step",
-    )
     args = parser.parse_args()
+    review_llm_model = args.model or review_model()
 
     output_dir = args.output_dir.expanduser().resolve()
     start_idx = STEP_INDEX[args.from_step]
@@ -360,47 +302,59 @@ Examples:
     is_url = source.startswith("http://") or source.startswith("https://")
     source_path = None if is_url else Path(source).expanduser().resolve()
 
-    # Determine PDF path and working directory
+    # Determine PDF path, run root, and steps working directory
     pdf_path: Path | None = None
+    run_dir: Path | None = None
     work_dir: Path | None = None
 
     # --- FETCH ---
     if start_idx <= STEP_INDEX["fetch"]:
         if is_url:
-            pdf_path = download_pdf(source, output_dir)
+            stem = safe_stem(Path(urlparse(source).path).stem or "document")
+            run_dir = run_dir_for_stem(output_dir, stem)
+            pdf_path = download_pdf(source, run_dir)
         elif source_path and source_path.is_file() and source_path.suffix.lower() == ".pdf":
             pdf_path = source_path
+            run_dir = run_dir_for_stem(output_dir, pdf_path.stem)
+            run_dir.mkdir(parents=True, exist_ok=True)
             print(f"\n  Using local PDF: {pdf_path}")
         elif source_path and source_path.is_dir():
-            work_dir = source_path
-            print(f"\n  Using existing output folder: {work_dir}")
+            run_dir = source_path
+            if run_dir.name == "steps":
+                run_dir = run_dir.parent
+            work_dir = work_dir_for_run(run_dir)
+            print(f"\n  Using existing run folder: {run_dir}")
         else:
             print(f"error: source is not a URL, PDF file, or directory: {source}", file=sys.stderr)
             sys.exit(1)
     else:
-        # Resuming: locate existing work directory
+        # Resuming: locate existing run directory
         if source_path and source_path.is_dir():
-            work_dir = source_path
+            run_dir = source_path
+            if run_dir.name == "steps":
+                run_dir = run_dir.parent
+            work_dir = work_dir_for_run(run_dir)
         elif source_path and source_path.is_file() and source_path.suffix.lower() == ".pdf":
             pdf_path = source_path
-            stem = _safe_stem(source_path.stem)
-            work_dir = find_output_folder(output_dir, stem)
-            if work_dir is None:
+            run_dir = find_run_dir(output_dir, pdf_path.stem)
+            if run_dir is None:
                 print(
-                    f"error: cannot find output folder for '{stem}' under {output_dir}",
+                    f"error: cannot find run folder for '{pdf_path.stem}' under {output_dir}",
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            work_dir = work_dir_for_run(run_dir)
         elif is_url:
-            stem = _safe_stem(Path(urlparse(source).path).stem)
-            work_dir = find_output_folder(output_dir, stem)
-            if work_dir is None:
+            stem = safe_stem(Path(urlparse(source).path).stem or "document")
+            run_dir = find_run_dir(output_dir, stem)
+            if run_dir is None:
                 print(
-                    f"error: cannot find output folder for '{stem}' under {output_dir}. "
+                    f"error: cannot find run folder for '{stem}' under {output_dir}. "
                     "Run fetch/reader first.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            work_dir = work_dir_for_run(run_dir)
         else:
             print(f"error: cannot resolve source: {source}", file=sys.stderr)
             sys.exit(1)
@@ -409,8 +363,8 @@ Examples:
         print(f"\n  Stopped after: fetch")
         if pdf_path:
             print(f"  PDF: {pdf_path}")
-        if work_dir:
-            print(f"  Output folder: {work_dir}")
+        if run_dir:
+            print(f"  Run folder: {run_dir}")
         return
 
     # --- READER ---
@@ -418,36 +372,48 @@ Examples:
         if pdf_path is None:
             print("error: no PDF available for reader step", file=sys.stderr)
             sys.exit(1)
+        if run_dir is None:
+            run_dir = run_dir_for_stem(output_dir, pdf_path.stem)
+        steps_dir = run_dir / "steps"
+        steps_dir.mkdir(parents=True, exist_ok=True)
         run_step(
             "Read paper (OCR -> full.md)",
-            [PY, str(_PIPELINE / "read-paper.py"), "--pdf", str(pdf_path), "--out-root", str(output_dir)],
+            [
+                PY,
+                str(_PIPELINE / "read-paper.py"),
+                "--pdf",
+                str(pdf_path),
+                "--out-dir",
+                str(steps_dir),
+            ],
         )
-        stem = _safe_stem(pdf_path.stem)
-        work_dir = find_output_folder(output_dir, stem)
-        if work_dir is None:
-            work_dir = output_dir / stem
+        work_dir = steps_dir
         if not (work_dir / "full.md").is_file():
             print(f"error: reader did not produce full.md in {work_dir}", file=sys.stderr)
             sys.exit(1)
-        print(f"  Work directory: {work_dir}")
+        print(f"  Run directory: {run_dir}")
+        print(f"  Work directory (steps): {work_dir}")
 
     if stop_idx <= STEP_INDEX["reader"]:
         print(f"\n  Stopped after: reader")
         if pdf_path:
             print(f"  PDF: {pdf_path}")
-        print(f"  Output folder: {work_dir}")
+        if run_dir:
+            print(f"  Run folder: {run_dir}")
         return
 
     # --- ADD_DATA ---
     if start_idx <= STEP_INDEX["add_data"] and stop_idx >= STEP_INDEX["add_data"]:
-        if work_dir is None and pdf_path:
-            stem = _safe_stem(pdf_path.stem)
-            work_dir = find_output_folder(output_dir, stem)
+        if run_dir is None and pdf_path:
+            run_dir = find_run_dir(output_dir, pdf_path.stem) or run_dir_for_stem(output_dir, pdf_path.stem)
+        if work_dir is None and run_dir is not None:
+            work_dir = work_dir_for_run(run_dir)
         if work_dir is None:
             print("error: cannot determine work directory for add_data step", file=sys.stderr)
             sys.exit(1)
+        if run_dir is None:
+            run_dir = work_dir.parent if work_dir.name == "steps" else work_dir
         if pdf_path is None:
-            # Try to find PDF from metadata
             meta_path = work_dir / "metadata.json"
             if meta_path.is_file():
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -455,8 +421,7 @@ Examples:
                 if candidate.is_file():
                     pdf_path = candidate
             if pdf_path is None:
-                # Look for a PDF in the output dir
-                pdfs = list(output_dir.glob("*.pdf"))
+                pdfs = list(run_dir.glob("*.pdf"))
                 if len(pdfs) == 1:
                     pdf_path = pdfs[0]
                 else:
@@ -475,7 +440,7 @@ Examples:
                 "--file", str(pdf_path),
                 "-o", str(kb_path),
             ],
-            env={**os.environ, "VALIDATOR_MODEL": args.model},
+            env=pipeline_env(model=review_llm_model),
         )
 
     if stop_idx <= STEP_INDEX["add_data"]:
@@ -515,9 +480,9 @@ Examples:
 
         article_type = classify_article_type(
             text,
-            model=args.model,
-            base_url=os.environ.get("VLLM_BASE_URL", VLLM_BASE_URL),
-            api_key=os.environ.get("VLLM_API_KEY", VLLM_API_KEY),
+            model=review_llm_model,
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY,
         )
 
         route_file.write_text(
@@ -543,14 +508,16 @@ Examples:
     # --- PIPELINE ---
     if start_idx <= STEP_INDEX["pipeline"] and stop_idx >= STEP_INDEX["pipeline"]:
         print(f"\n  Routing to: {article_type}")
+        if run_dir is None:
+            run_dir = work_dir.parent if work_dir.name == "steps" else work_dir
         route_to_pipeline(
             article_type=article_type,
             work_dir=work_dir,
             kb_path=kb_path,
-            model=args.model,
+            model=review_llm_model,
             skip_llm=args.skip_llm,
             overwrite=args.overwrite,
-            output_dir=output_dir,
+            run_dir=run_dir,
         )
 
     if stop_idx <= STEP_INDEX["pipeline"]:
@@ -558,38 +525,6 @@ Examples:
         print(f"  Article type: {article_type}")
         print(f"  Work directory: {work_dir}")
         return
-
-    # --- UPLOAD ---
-    if start_idx <= STEP_INDEX["upload"] and stop_idx >= STEP_INDEX["upload"]:
-        if not args.skip_upload:
-            print(f"\n{'='*60}")
-            print("  Arweave Upload")
-            print(f"{'='*60}")
-            
-            upload_output_dir = work_dir / "output"
-            if not upload_output_dir.is_dir():
-                print(f"  ! Warning: No output directory found at {upload_output_dir}")
-                print(f"    Skipping upload step.")
-            else:
-                scale_article_output_scores_to_percent(upload_output_dir)
-                # Import uploader module
-                try:
-                    sys.path.insert(0, str(_REPO_ROOT / "articles"))
-                    from article_uploader.uploader import run_upload_sequence
-                    
-                    upload_result = run_upload_sequence(upload_output_dir)
-                    
-                    if not upload_result.get("success"):
-                        print(f"\n  ! Upload failed: {upload_result.get('error', 'Unknown error')}")
-                        print(f"    You can retry with: python article_uploader/uploader.py --output-dir \"{upload_output_dir}\" --resume")
-                except ImportError as e:
-                    print(f"\n  ! Warning: Could not import uploader: {e}")
-                    print(f"    Skipping upload step.")
-                except Exception as e:
-                    print(f"\n  ! Upload error: {e}")
-                    print(f"    You can retry with: python article_uploader/uploader.py --output-dir \"{upload_output_dir}\" --resume")
-        else:
-            print(f"\n  Skipped: Arweave upload (--skip-upload)")
 
     print(f"\n{'='*60}")
     print("  Pipeline complete")

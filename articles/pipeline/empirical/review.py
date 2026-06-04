@@ -31,9 +31,15 @@ PIPELINE_DIR = _BASE.parent
 PROMPTS_DIR = _BASE / "prompts"
 MAPPINGS_PATH = PIPELINE_DIR / "mappings.json"
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "none")
-MODEL = os.environ.get("VALIDATOR_MODEL", "/model")
+import sys
+from pathlib import Path as _Path
+_ARTICLES = _Path(__file__).resolve().parents[2]
+if str(_ARTICLES) not in sys.path:
+    sys.path.insert(0, str(_ARTICLES))
+from llm_env import LLM_API_KEY, LLM_BASE_URL  # noqa: E402
+VLLM_BASE_URL = LLM_BASE_URL
+VLLM_API_KEY = LLM_API_KEY
+MODEL = os.environ.get("LLM_MODEL") or os.environ.get("VALIDATOR_MODEL", "/model")
 
 MAX_RETRIES = 4
 RATIONALE_GEN_MAX_TOKENS = 512

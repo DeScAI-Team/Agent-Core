@@ -1,8 +1,11 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { getProjectDataRoomFiles } from "./molecule-lib-bridge.js"
-
-const PROFILE_FILENAME = "profile.json"
+import {
+  ensureProjectLayout,
+  PROFILE_FILENAME,
+  resolveProfileJsonPath,
+} from "./ipnft-layout.js"
 const MANIFEST_FILENAME = "manifest.json"
 const DATAROOM_FILENAME = "dataroom.json"
 
@@ -71,6 +74,27 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms))
 }
 
+/** Prefer output/; accept legacy binaries left in metadata/. */
+async function resolveDownloadPath(
+  contentDir: string,
+  metadataDir: string,
+  fileName: string,
+): Promise<string> {
+  const primary = path.join(contentDir, fileName)
+  try {
+    await fs.access(primary)
+    return primary
+  } catch {
+    const legacy = path.join(metadataDir, fileName)
+    try {
+      await fs.access(legacy)
+      return legacy
+    } catch {
+      return primary
+    }
+  }
+}
+
 async function downloadFile(url: string, dest: string): Promise<void> {
   const res = await fetch(url)
   if (!res.ok) {
@@ -93,19 +117,21 @@ export async function runDataBundle(opts: DataBundleOptions): Promise<void> {
   const profileDirs: { dir: string; folderName: string; tokenId: string }[] = []
 
   for (const entry of entries) {
-    const profilePath = path.join(resolvedDir, entry, PROFILE_FILENAME)
+    const projectDir = path.join(resolvedDir, entry)
+    const profilePath = await resolveProfileJsonPath(projectDir)
+    if (!profilePath) continue
     try {
       const raw = await fs.readFile(profilePath, "utf-8")
       const profile = JSON.parse(raw)
       const ipnftId = profile?.ipnft?.id
       if (!ipnftId) continue
       profileDirs.push({
-        dir: path.join(resolvedDir, entry),
+        dir: projectDir,
         folderName: entry,
         tokenId: String(ipnftId),
       })
     } catch {
-      // no profile.json or unreadable — skip
+      // unreadable profile — skip
     }
   }
 
@@ -117,7 +143,7 @@ export async function runDataBundle(opts: DataBundleOptions): Promise<void> {
 
   if (profileDirs.length === 0) {
     process.stderr.write(
-      `Hint: data-bundle only uses profile.json where ipnft.id is set. ` +
+      `Hint: data-bundle only uses metadata/profile.json where ipnft.id is set. ` +
         `Profiles with null ipnft or fetch errors have no id, so the second step skips them.\n`,
     )
   }
@@ -148,7 +174,8 @@ export async function runDataBundle(opts: DataBundleOptions): Promise<void> {
       continue
     }
 
-    const dataroomPath = path.join(dir, DATAROOM_FILENAME)
+    const meta = await ensureProjectLayout(dir)
+    const dataroomPath = path.join(meta.metadata, DATAROOM_FILENAME)
     const dataroomPayload = {
       tokenId,
       fileCount: files.length,
@@ -187,7 +214,11 @@ export async function runDataBundle(opts: DataBundleOptions): Promise<void> {
     } else {
       for (const f of deduped) {
         const fileName = deriveFileName(f.path, f.contentType)
-        const destPath = path.join(dir, fileName)
+        const destPath = await resolveDownloadPath(
+          meta.output,
+          meta.metadata,
+          fileName,
+        )
 
         let alreadyExists = false
         try {
@@ -209,7 +240,8 @@ export async function runDataBundle(opts: DataBundleOptions): Promise<void> {
         }
 
         try {
-          await downloadFile(f.downloadUrl, destPath)
+          const writePath = path.join(meta.output, fileName)
+          await downloadFile(f.downloadUrl, writePath)
           manifest.push({
             description: f.description ?? "",
             path: f.path,
@@ -231,7 +263,7 @@ export async function runDataBundle(opts: DataBundleOptions): Promise<void> {
         }
       }
 
-      const manifestPath = path.join(dir, MANIFEST_FILENAME)
+      const manifestPath = path.join(meta.metadata, MANIFEST_FILENAME)
       await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8")
       process.stderr.write(
         `${deduped.length} public, ${manifest.length} in manifest\n`,
