@@ -76,7 +76,7 @@ cd ../crawlers/molecule/crawler && npm install   # if running Molecule crawl
 | [Articles](articles/README.md) | [`articles/pipeline/run_full_pipeline.py`](articles/pipeline/run_full_pipeline.py) | PDF URL or local PDF | `reviews/articles/<stem>/` |
 | [DAOs](DAOs/molecule/README.md) | [`DAOs/molecule/pipeline/run_dao_review.py`](DAOs/molecule/pipeline/run_dao_review.py) | `crawlers/output/molecule/ipnfts/<SYMBOL>` | `reviews/DAOs/<SYMBOL>/` |
 | [Proposals](proposals/README.md) | [`proposals/pipeline/proposal_pipe.py`](proposals/pipeline/proposal_pipe.py) | `crawlers/output/researchhub/proposals/proposal_*.json` | `reviews/proposals/proposal_<id>/` |
-| [Compounds](compounds/README.md) | [`compounds/pipeline/single/run_review.py`](compounds/pipeline/single/run_review.py) or [`compounds/orchestrate.py`](compounds/orchestrate.py) | `crawlers/output/pump.science/compound-tokens.json` | `reviews/compounds/<TICKER>/` |
+| [Compounds](compounds/README.md) | [`compounds/pipeline/single/run_review.py`](compounds/pipeline/single/run_review.py) or [`compounds/orchestrate.py`](compounds/orchestrate.py) | Local token manifest (see compounds README) | `reviews/compounds/<TICKER>/` |
 
 ### Per-route examples
 
@@ -189,7 +189,8 @@ See [`snapshotter/README.md`](snapshotter/README.md) for R2 setup and flags.
 - [Compounds review logic](compounds/REVIEW_LOGIC.md) — scoring and synthesis details
 - [DAO pipeline](DAOs/molecule/README.md) — IPNFT dataroom → six-category review
 - [Proposals pipeline](proposals/README.md) — ResearchHub funding proposal review
-- [ResearchHub crawler](crawlers/research-hub/README.md) — papers and proposals ingestion
-- [Molecule crawler](crawlers/molecule/crawler/README.md) — IPNFT dataroom + link crawl
+- ResearchHub crawler: [crawlers/research-hub/README.md](../research-hub/README.md)
+- Molecule crawler: [crawlers/molecule/crawler/README.md](../crawlers/molecule/crawler/README.md)
+- Crawlers overview: [crawlers/README.md](../crawlers/README.md)
 - [Uploader](uploader/README.md) — Arweave recipes and wallet setup
 - [Snapshotter](snapshotter/README.md) — R2 backup of crawl + review artifacts
