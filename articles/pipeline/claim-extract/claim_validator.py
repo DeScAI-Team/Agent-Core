@@ -41,7 +41,7 @@ VLLM_API_KEY = LLM_API_KEY
 MODEL = os.environ.get("LLM_MODEL") or os.environ.get("VALIDATOR_MODEL", "mixtral-8x7b-instruct")
 CONCURRENCY           = int(os.environ.get("VALIDATOR_CONCURRENCY", "15"))
 
-MAX_RETRIES           = 3
+MAX_RETRIES           = 2
 KEY_SECTION_MAX_CHARS = int(os.environ.get("VALIDATOR_KEY_SECTION_MAX_CHARS", "6000"))
 
 _data_base = os.environ.get("CLAIM_EXTRACT_DATA_DIR") or os.path.dirname(__file__)
@@ -444,8 +444,8 @@ async def validate_claim(
             except Exception as exc:
                 last_error_msg = str(exc)[:120]
                 print(f"  [ERROR]     chunk {record.get('chunk_id')} attempt {attempt + 1} — {last_error_msg}")
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(2 ** attempt)
+                # No backoff: target is localhost llama-server (deterministic, no rate-limiting).
+                # Sleeping here would hold the semaphore and block other concurrent claims.
 
         # --- fallback: verdict ---
         if verdict not in VALID_VERDICTS:
@@ -508,15 +508,22 @@ async def main() -> None:
 
     counter = [0]
 
-    async def tracked(record: dict) -> dict:
+    async def tracked(idx: int, record: dict) -> tuple[int, dict]:
         result = await validate_claim(client, semaphore, record, chunk_index)
         counter[0] += 1
         n = counter[0]
         if n % 25 == 0 or n == len(claims):
             print(f"  [{n}/{len(claims)}] processed...")
-        return result
+        return idx, result
 
-    results = await asyncio.gather(*[tracked(rec) for rec in claims])
+    # Submit claims grouped by doc_name (stable within doc) so successive requests
+    # to the same llama-server slot share a long static prefix → much higher prefix
+    # cache hit rate. Re-sort results to original input order before writing.
+    indexed = list(enumerate(claims))
+    indexed.sort(key=lambda pair: (pair[1].get("doc_name", ""), pair[0]))
+    gathered = await asyncio.gather(*[tracked(idx, rec) for idx, rec in indexed])
+    gathered.sort(key=lambda pair: pair[0])
+    results = [rec for _, rec in gathered]
 
     errors = sum(1 for r in results if r.get("validation_error"))
     with open(OUTPUT_VALIDATED, "w") as f:

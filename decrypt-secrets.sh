@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-readonly ARWEAVE_AGE_NAME='arweave-keyfile-jOMEW4KCKkghYzpW6rB8SiUXJa1TvnWZf-Kxck94yn8.json.age'
+readonly ARWEAVE_AGE_NAME='arweave-keyfile-8SnC2YfQq6PinqzyHwP_JHenDEc19mmY8gM3bl51NfA.json.age'
 readonly ENV_AGE_NAME='.env.age'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

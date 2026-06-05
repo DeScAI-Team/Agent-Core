@@ -131,6 +131,13 @@ ENV PATH=/opt/llama.cpp/build/bin:/opt/whisper.cpp/build/bin:${PATH} \
 RUN ln -sf /opt/llama.cpp/build/bin/llama-server /usr/local/bin/llama-server \
  && ln -sf /opt/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli
 
+# Whisper "small" model (~466 MB) — baked in so it survives ephemeral container
+# restarts (no persistent /opt mount) and removes one HF dep at boot. Path matches
+# WHISPER_MODEL_PATH in .env; entrypoint's ensure_file() auto-skips when present.
+RUN mkdir -p /opt/whisper/models \
+ && curl -fsSL -o /opt/whisper/models/ggml-small.bin \
+      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+
 # App
 WORKDIR /app
 COPY . /app
@@ -140,12 +147,17 @@ RUN python3 -m pip install --upgrade pip \
  && python3 -m pip install --no-cache-dir -r /app/requirements.txt \
  && touch /app/.entrypoint-pip-done
 
-# Crawl4AI / Playwright browsers + chromium system deps (needs root; available in build).
-RUN crawl4ai-setup || true
-
-# Node deps — pre-install so first container start is fast (entrypoint re-runs idempotently).
+# Node deps — bake in so the entrypoint skips npm install at runtime (marker gated).
 RUN npm install --prefix /app/uploader \
- && npm install --prefix /app/crawlers/molecule/crawler
+ && npm install --prefix /app/crawlers/molecule/crawler \
+ && touch /app/.entrypoint-npm-done
+
+# Playwright + Chromium (used by crawl4ai under the hood for link crawling).
+# --with-deps pulls Chromium's Linux runtime libs; only works as root at build time.
+# Then crawl4ai-setup runs its own init (DB warmup, etc.) against the installed browser.
+RUN python3 -m playwright install --with-deps chromium \
+ && crawl4ai-setup \
+ && touch /app/.entrypoint-crawl4ai-done
 
 # Scripts executable.
 RUN chmod +x /app/entrypoint.sh /app/decrypt-secrets.sh

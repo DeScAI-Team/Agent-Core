@@ -32,7 +32,6 @@
 
 set -euo pipefail
 
-readonly ARWEAVE_JSON='arweave-keyfile-jOMEW4KCKkghYzpW6rB8SiUXJa1TvnWZf-Kxck94yn8.json'
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 REVIEW_GENERATOR_ROOT="${REVIEW_GENERATOR_ROOT:-$SCRIPT_DIR}"
@@ -41,6 +40,8 @@ LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-/opt/llama.cpp/build/bin/llama-server}"
 HF_HOME="${HF_HOME:-$MODELS_ROOT/hf-cache}"
 PYTHON="${PYTHON:-python3}"
 PIP_INSTALL_MARKER="${PIP_INSTALL_MARKER:-$REVIEW_GENERATOR_ROOT/.entrypoint-pip-done}"
+NPM_INSTALL_MARKER="${NPM_INSTALL_MARKER:-$REVIEW_GENERATOR_ROOT/.entrypoint-npm-done}"
+CRAWL4AI_INSTALL_MARKER="${CRAWL4AI_INSTALL_MARKER:-$REVIEW_GENERATOR_ROOT/.entrypoint-crawl4ai-done}"
 LOG_DIR="${LOG_DIR:-$REVIEW_GENERATOR_ROOT/logs}"
 
 LLAMA_WAIT_ATTEMPTS="${LLAMA_WAIT_ATTEMPTS:-60}"
@@ -139,7 +140,16 @@ decrypt_secrets() {
     ./decrypt-secrets.sh
   )
   [[ -f "$REVIEW_GENERATOR_ROOT/.env" ]] || die 'decrypt did not produce .env'
-  [[ -f "$REVIEW_GENERATOR_ROOT/$ARWEAVE_JSON" ]] || die "decrypt did not produce $ARWEAVE_JSON"
+  # Discover whichever arweave-keyfile-*.json was just decrypted (no hardcoded
+  # wallet name — decrypt-secrets.sh is the source of truth for which one).
+  local arweave_jsons=("$REVIEW_GENERATOR_ROOT"/arweave-keyfile-*.json)
+  if [[ ! -f "${arweave_jsons[0]}" ]]; then
+    die 'decrypt did not produce any arweave-keyfile-*.json'
+  fi
+  if (( ${#arweave_jsons[@]} > 1 )); then
+    log "warning: multiple arweave-keyfile-*.json present (${#arweave_jsons[@]}); using $(basename "${arweave_jsons[0]}")"
+  fi
+  export ARWEAVE_JSON_PATH="${arweave_jsons[0]}"
 }
 
 install_python_deps() {
@@ -153,6 +163,10 @@ install_python_deps() {
 }
 
 install_node_deps() {
+  if [[ -f "$NPM_INSTALL_MARKER" ]]; then
+    log "node deps already installed ($NPM_INSTALL_MARKER)"
+    return 0
+  fi
   command -v npm >/dev/null 2>&1 || die 'npm not on PATH (bake Node.js into the image)'
 
   log 'installing node dependencies (uploader)'
@@ -160,15 +174,22 @@ install_node_deps() {
 
   log 'installing node dependencies (molecule crawler)'
   npm install --prefix "$REVIEW_GENERATOR_ROOT/crawlers/molecule/crawler"
+
+  touch "$NPM_INSTALL_MARKER"
 }
 
 install_crawl4ai_browsers() {
-  if command -v crawl4ai-setup >/dev/null 2>&1; then
-    log 'running crawl4ai-setup (playwright browsers)'
-    crawl4ai-setup
-  else
-    log 'crawl4ai-setup not on PATH — skipping playwright install'
+  if [[ -f "$CRAWL4AI_INSTALL_MARKER" ]]; then
+    log "crawl4ai/playwright already installed ($CRAWL4AI_INSTALL_MARKER)"
+    return 0
   fi
+  command -v crawl4ai-setup >/dev/null 2>&1 \
+    || die 'crawl4ai-setup not on PATH (bake crawl4ai into the image)'
+  log 'installing playwright chromium'
+  "$PYTHON" -m playwright install chromium
+  log 'running crawl4ai-setup'
+  crawl4ai-setup
+  touch "$CRAWL4AI_INSTALL_MARKER"
 }
 
 install_deps() {
@@ -273,16 +294,24 @@ start_llama_servers() {
   tagger_port="$(port_from_url "${TAGGER_BASE_URL:-http://127.0.0.1:8002/v1}" 8002)"
 
   log "starting llama-server (main) on port $llm_port"
+  # -fa: flash attention (Hopper-friendly, ~30% faster prompt eval + smaller KV cache).
+  # --parallel 8: 8 concurrent slots (matches validators that fan out at CONCURRENCY=15).
+  # -c 80000: total context, ~10k tokens/slot with --parallel 8 (headroom for long prompts).
   "$LLAMA_SERVER_BIN" \
     -m "$MODELS_ROOT/qwen3.6-27b/Qwen3.6-27B-Q8_0.gguf" \
     --n-gpu-layers 99 \
-    -c 64000 \
+    -fa \
+    --parallel 8 \
+    -c 80000 \
     --port "$llm_port" \
     --chat-template-kwargs '{"enable_thinking":true}' \
     >"$LOG_DIR/llama-main.log" 2>&1 &
   LLAMA_PIDS+=("$!")
 
   log "starting llama-server (vision) on port $vision_port"
+  # Note: deliberately NOT passing -fa here. Flash attention with mmproj vision
+  # towers has historically been buggy in llama.cpp; vision isn't a bottleneck,
+  # not worth the risk. Re-add only after verifying OCR quality is unaffected.
   "$LLAMA_SERVER_BIN" \
     -m "$MODELS_ROOT/nanonets-ocr2-3b/Nanonets-OCR2-3B.Q8_0.gguf" \
     --mmproj "$MODELS_ROOT/nanonets-ocr2-3b/Nanonets-OCR2-3B.mmproj-Q8_0.gguf" \
@@ -296,6 +325,7 @@ start_llama_servers() {
     --model "$MODELS_ROOT/qwen3.5-9b/Qwen3.5-9B-Q4_0.gguf" \
     --ctx-size 32000 \
     --n-gpu-layers 99 \
+    -fa \
     --port "$tagger_port" \
     >"$LOG_DIR/llama-tagger.log" 2>&1 &
   LLAMA_PIDS+=("$!")
@@ -371,7 +401,7 @@ run_orchestrate() {
   (
     cd "$REVIEW_GENERATOR_ROOT"
     exec "$PYTHON" "$REVIEW_GENERATOR_ROOT/orchestrate.py" "$@"
-  ) >"$ORCHESTRATE_LOG" 2>&1 &
+  ) > >(tee "$ORCHESTRATE_LOG") 2>&1 &
   local orch_pid=$!
   echo "$orch_pid" >"$ORCHESTRATE_PID_FILE"
   # Capture orchestrator exit code without tripping `set -e` on non-zero exits.
