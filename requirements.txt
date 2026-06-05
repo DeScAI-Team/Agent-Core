@@ -6,6 +6,8 @@ python-dotenv>=1.0.0
 docling>=2.0.0
 docling-core>=2.0.0
 transformers>=4.40.0
+# Hugging Face Hub CLI (`hf download`, `hf auth login`, … — not legacy `huggingface-cli`)
+hf>=1.17.0
 # OCR stack Docling uses for many PDFs (RapidOCR + torch); avoids opaque first-run only deps
 rapidocr>=3.0.0
 

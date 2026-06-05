@@ -2,7 +2,7 @@
 
 Standalone upload module for [Agent Core](../README.md) pipeline outputs. Reads wallet configuration from the **repo-root [`.env`](../.env)** only (`PATH_TO_KEYFILE`, `AGENT_WALLET`).
 
-Pipelines no longer upload in-process. [`orchestrate.py`](../orchestrate.py) runs this module **after each review item** completes. The final orchestrator step is R2 snapshot (`python -m snapshotter`), not upload.
+Pipelines no longer upload in-process. [`orchestrate.py`](../orchestrate.py) runs this module **after each review item** completes. Successful review uploads auto-mark the matching entry as `reviewed` in [`crawlers/output/crawl-log.json`](../crawlers/output/crawl-log.json) (v2 schema). The orchestrator uploads that file to Arweave every 5 successful review uploads. The final orchestrator step is R2 snapshot (`python -m snapshotter`), not upload.
 
 ## Setup
 
@@ -42,6 +42,7 @@ python -m uploader --recipe crawl-log --file crawlers/output/crawl-log.json [--o
 | `--file` | Input file for `crawl-log` |
 | `--crawl-date` | Override `Crawl-Date` tag for crawl-log |
 | `--resume` | Skip steps already recorded in output-dir metadata |
+| `--crawl-log-file` | Override crawl-log path for auto-marking after review uploads (default: `crawlers/output/crawl-log.json`) |
 
 Separate inputs and metadata:
 
@@ -88,7 +89,15 @@ Tags: `doctype`, `platform=PumpScience`, `category=compounds`, `compounds`, `dat
 
 ### Crawl-log (1 step)
 
+Upload-only recipe (no reviewed marking). Use for post-crawl snapshots and orchestrator checkpoints. Do **not** pass `--resume` for checkpoint uploads.
+
 Tags: `doctype=crawllog`, `Crawl-Date`, `Content-Type=application/json`
+
+Crawl-log v2 entries are objects with optional `reviewed: "reviewed"`:
+
+- `researchhub.files[]`: `{ "path": "papers/..." }` or `{ "path": "proposals/...", "reviewed": "reviewed" }`
+- `molecule.folders[]`: `{ "name": "..." }`
+- `pumpScience.tickers[]`: `{ "ticker": "..." }`
 
 ## Library API
 

@@ -45,6 +45,12 @@ def main() -> int:
         action="store_true",
         help="Skip steps already recorded in output-dir upload_metadata.json",
     )
+    parser.add_argument(
+        "--crawl-log-file",
+        type=str,
+        default=None,
+        help="Path to crawl-log.json for auto-marking reviewed after review recipe uploads",
+    )
     args = parser.parse_args()
 
     try:
@@ -55,6 +61,7 @@ def main() -> int:
             file=args.file,
             crawl_date=args.crawl_date,
             resume=args.resume,
+            crawl_log_path=args.crawl_log_file,
         )
     except (ValueError, RuntimeError) as e:
         print(f"\n  Error: {e}", file=sys.stderr)

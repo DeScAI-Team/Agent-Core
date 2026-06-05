@@ -4,7 +4,9 @@ Top-level on-chain agent orchestrator.
 
 Step 1: Crawl (node crawlers/full-crawl.mjs, uploads crawl-log to Arweave)
 Steps 2–5: Review every item under crawlers/output (articles, DAOs, proposals, compounds)
-Per item: run the route pipeline, then upload the review bundle (python -m uploader --resume)
+Per item: run the route pipeline, then upload the review bundle (python -m uploader --resume).
+Successful review uploads auto-mark reviewed in crawl-log.json (uploader core); orchestrator
+uploads crawl-log to Arweave every 5 successful review uploads.
 Step 6: Snapshot crawlers/output + reviews/ (python -m snapshotter → snapshot.tar.zst + R2)
 
 Crawl output: crawlers/output/
@@ -13,7 +15,8 @@ Review output: reviews/{articles,DAOs,proposals,compounds}/
 Usage:
   python orchestrate.py                   # same as --all (default)
   python orchestrate.py --all             # crawl, review all items, upload each
-  python orchestrate.py --test            # crawl, one sample per route, upload each
+  python orchestrate.py --test            # crawl, up to 10 reviews across routes, upload each
+  python orchestrate.py --test --test-limit 10 --skip-crawl  # uploader / crawl-log checkpoint smoke
   python orchestrate.py --dry-run         # print commands only
   python orchestrate.py --skip-crawl      # use existing crawlers/output
   python orchestrate.py --skip-upload     # pipelines only (crawl-log still uploads on crawl)
@@ -42,6 +45,8 @@ PDF_HEAD_TIMEOUT_SEC = 30
 REPO_ROOT = Path(__file__).resolve().parent
 
 CRAWL_ROOT = REPO_ROOT / "crawlers" / "output"
+CRAWL_LOG_PATH = CRAWL_ROOT / "crawl-log.json"
+CRAWL_LOG_CHECKPOINT_EVERY = 5
 PAPERS_DIR = CRAWL_ROOT / "researchhub" / "papers"
 PROPOSALS_DIR = CRAWL_ROOT / "researchhub" / "proposals"
 MOLECULE_INPUT_DIR = CRAWL_ROOT / "molecule" / "ipnfts"
@@ -64,6 +69,12 @@ if str(_ARTICLES_DIR) not in sys.path:
 from pipeline.run_layout import find_run_dir, review_dir_for_run, run_dir_for_stem, safe_stem  # noqa: E402
 
 PY = sys.executable
+
+TEST_MODE_REVIEW_LIMIT = 10
+
+_reviews_uploaded_since_checkpoint = 0
+_crawl_log_checkpoint_failures = 0
+_test_review_budget = 0
 
 
 def _banner(msg: str) -> None:
@@ -88,6 +99,59 @@ def _print_summary(title: str, results: list[tuple[str, bool, str]]) -> int:
 
 # ── Publish / upload helpers ─────────────────────────────────
 
+def _reset_crawl_log_checkpoint_state() -> None:
+    global _reviews_uploaded_since_checkpoint, _crawl_log_checkpoint_failures
+    _reviews_uploaded_since_checkpoint = 0
+    _crawl_log_checkpoint_failures = 0
+
+
+def _sync_crawl_log_for_reviews() -> None:
+    """Load on-chain crawl-log when local file is missing (e.g. --skip-crawl on fresh disk)."""
+    if CRAWL_LOG_PATH.is_file():
+        return
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from uploader.crawl_log import sync_crawl_log_from_chain
+
+    sync_crawl_log_from_chain(CRAWL_LOG_PATH)
+
+
+def upload_crawl_log_checkpoint(*, dry_run: bool) -> bool:
+    """Upload crawl-log.json to Arweave (no --resume). Returns True on success or dry-run."""
+    cmd = [
+        PY,
+        "-m",
+        "uploader",
+        "--recipe",
+        "crawl-log",
+        "--file",
+        str(CRAWL_LOG_PATH),
+        "--output-dir",
+        str(CRAWL_ROOT),
+    ]
+    print(f"  crawl-log checkpoint: {' '.join(cmd)}")
+    if dry_run:
+        print("  [dry-run] crawl-log checkpoint skipped")
+        return True
+    if not CRAWL_LOG_PATH.is_file():
+        print(f"  ! crawl-log checkpoint skipped — missing {CRAWL_LOG_PATH}", file=sys.stderr)
+        return False
+    result = subprocess.run(cmd, cwd=str(REPO_ROOT))
+    if result.returncode != 0:
+        print(f"  crawl-log checkpoint FAILED (exit {result.returncode})", file=sys.stderr)
+        return False
+    print("  crawl-log checkpoint OK")
+    return True
+
+
+def _maybe_upload_crawl_log_checkpoint(*, dry_run: bool) -> None:
+    global _reviews_uploaded_since_checkpoint, _crawl_log_checkpoint_failures
+    if _reviews_uploaded_since_checkpoint % CRAWL_LOG_CHECKPOINT_EVERY != 0:
+        return
+    if not upload_crawl_log_checkpoint(dry_run=dry_run):
+        _crawl_log_checkpoint_failures += 1
+
+
 def is_publishable_bundle(review_dir: Path) -> bool:
     """True when review_dir has evidence_audit.md, overview.json, and a review JSON."""
     if not review_dir.is_dir():
@@ -109,6 +173,8 @@ def upload_bundle(
     skip_upload: bool,
 ) -> bool:
     """Upload review bundle; return True on success or skip."""
+    global _reviews_uploaded_since_checkpoint
+
     if skip_upload:
         return True
 
@@ -137,6 +203,8 @@ def upload_bundle(
         print(f"  upload FAILED (exit {result.returncode})", file=sys.stderr)
         return False
     print("  upload OK")
+    _reviews_uploaded_since_checkpoint += 1
+    _maybe_upload_crawl_log_checkpoint(dry_run=False)
     return True
 
 
@@ -182,7 +250,20 @@ def compound_review_dir(ticker: str) -> Path:
     return COMPOUND_OUTPUT_DIR / ticker / "review"
 
 
-# ── Test-mode sampling (one item per route) ───────────────────
+# ── Test-mode sampling (shared budget across routes) ──────────
+
+def _reset_test_budget(limit: int) -> None:
+    global _test_review_budget
+    _test_review_budget = max(0, limit)
+
+
+def _current_test_budget() -> int:
+    return _test_review_budget
+
+
+def _consume_test_budget(used: int) -> None:
+    global _test_review_budget
+    _test_review_budget = max(0, _test_review_budget - used)
 
 def _pdf_content_length(url: str) -> int | None:
     req = urllib.request.Request(url, method="HEAD")
@@ -196,8 +277,8 @@ def _pdf_content_length(url: str) -> int | None:
     return None
 
 
-def pick_test_paper() -> tuple[Path, str]:
-    """Smallest PDF (by Content-Length) among papers with pdf_url."""
+def pick_test_papers(limit: int) -> list[tuple[Path, str]]:
+    """Smallest PDFs first (by Content-Length), up to ``limit`` papers with pdf_url."""
     rows: list[tuple[Path, str, int]] = []
     for path in sorted(PAPERS_DIR.glob("PaperRecord_*.json")):
         try:
@@ -215,11 +296,12 @@ def pick_test_paper() -> tuple[Path, str]:
         rows.append((path, url, size))
     if not rows:
         raise RuntimeError(f"No papers with pdf_url under {PAPERS_DIR}")
-    path, url, _ = min(rows, key=lambda row: (row[2], row[0].name.lower()))
-    return path, url
+    rows.sort(key=lambda row: (row[2], row[0].name.lower()))
+    return [(path, url) for path, url, _ in rows[:limit]]
 
 
-def pick_test_proposal() -> Path:
+def pick_test_proposals(limit: int) -> list[Path]:
+    """Shortest proposal bodies first, up to ``limit`` proposals."""
     rows: list[tuple[Path, int]] = []
     for path in sorted(PROPOSALS_DIR.glob("proposal_*.json")):
         try:
@@ -236,26 +318,28 @@ def pick_test_proposal() -> Path:
             rows.append((path, length))
     if not rows:
         raise RuntimeError(f"No proposals with text under {PROPOSALS_DIR}")
-    return min(rows, key=lambda row: (row[1], row[0].name.lower()))[0]
+    rows.sort(key=lambda row: (row[1], row[0].name.lower()))
+    return [path for path, _ in rows[:limit]]
 
 
-def pick_test_ipnft(*, seed: int | None) -> Path:
+def pick_test_ipnfts(limit: int, *, seed: int | None) -> list[Path]:
     dirs = _collect_ipnft_dirs()
     if not dirs:
         raise RuntimeError(f"No IPNFT folders with profile.json under {MOLECULE_INPUT_DIR}")
-    return random.Random(seed).choice(dirs)
+    if seed is not None:
+        dirs = list(dirs)
+        random.Random(seed).shuffle(dirs)
+    return dirs[:limit]
 
 
-def pick_test_compound() -> tuple[str, list[str]]:
+def pick_test_compounds(limit: int) -> list[tuple[str, list[str]]]:
     entries = _collect_compound_tokens()
     if not entries:
         raise RuntimeError(f"No compound tokens under {COMPOUND_TOKENS_FILE}")
     singles = [row for row in entries if len(row[1]) == 1]
     pool = singles if singles else entries
-    return min(
-        pool,
-        key=lambda row: (len(row[1]), sum(len(n) for n in row[1]), row[0].lower()),
-    )
+    pool.sort(key=lambda row: (len(row[1]), sum(len(n) for n in row[1]), row[0].lower()))
+    return pool[:limit]
 
 
 # ── Step 1: Crawl ────────────────────────────────────────────
@@ -307,12 +391,17 @@ def run_article_reviews(
     _banner("Step 2 — Article reviews")
 
     if test_mode:
+        budget = _current_test_budget()
+        if budget <= 0:
+            print("  Test mode: review budget exhausted — skipping articles\n")
+            return 0
         try:
-            papers = [pick_test_paper()]
+            papers = pick_test_papers(budget)
         except RuntimeError as exc:
             print(f"  {exc}")
             return 1
-        print(f"  Test mode: 1 paper — {papers[0][0].name}\n")
+        _consume_test_budget(len(papers))
+        print(f"  Test mode: {len(papers)} paper(s) — {', '.join(p[0].name for p in papers)}\n")
     else:
         papers = _collect_papers()
         if not papers:
@@ -406,12 +495,20 @@ def run_dao_reviews(
     _banner("Step 3 — DAO reviews (Molecule IP-NFTs)")
 
     if test_mode:
+        budget = _current_test_budget()
+        if budget <= 0:
+            print("  Test mode: review budget exhausted — skipping DAOs\n")
+            return 0
         try:
-            ipnft_dirs = [pick_test_ipnft(seed=test_seed)]
+            ipnft_dirs = pick_test_ipnfts(budget, seed=test_seed)
         except RuntimeError as exc:
             print(f"  {exc}")
             return 1
-        print(f"  Test mode: 1 IPNFT — {ipnft_dirs[0].name}\n")
+        _consume_test_budget(len(ipnft_dirs))
+        print(
+            f"  Test mode: {len(ipnft_dirs)} IPNFT(s) — "
+            f"{', '.join(d.name for d in ipnft_dirs)}\n"
+        )
     else:
         ipnft_dirs = _collect_ipnft_dirs()
         if not ipnft_dirs:
@@ -479,12 +576,20 @@ def run_proposal_reviews(
     _banner("Step 4 — Proposal reviews")
 
     if test_mode:
+        budget = _current_test_budget()
+        if budget <= 0:
+            print("  Test mode: review budget exhausted — skipping proposals\n")
+            return 0
         try:
-            proposals = [pick_test_proposal()]
+            proposals = pick_test_proposals(budget)
         except RuntimeError as exc:
             print(f"  {exc}")
             return 1
-        print(f"  Test mode: 1 proposal — {proposals[0].name}\n")
+        _consume_test_budget(len(proposals))
+        print(
+            f"  Test mode: {len(proposals)} proposal(s) — "
+            f"{', '.join(p.name for p in proposals)}\n"
+        )
     else:
         proposals = _collect_proposals()
         if not proposals:
@@ -587,13 +692,20 @@ def run_compound_reviews(
         print("  Note: --no-vis has no effect on compound pipeline", flush=True)
 
     if test_mode:
+        budget = _current_test_budget()
+        if budget <= 0:
+            print("  Test mode: review budget exhausted — skipping compounds\n")
+            return 0
         try:
-            tokens = [pick_test_compound()]
+            tokens = pick_test_compounds(budget)
         except RuntimeError as exc:
             print(f"  {exc}")
             return 1
-        ticker, compounds = tokens[0]
-        print(f"  Test mode: 1 token — {ticker} ({', '.join(compounds)})\n")
+        _consume_test_budget(len(tokens))
+        print(
+            f"  Test mode: {len(tokens)} token(s) — "
+            f"{', '.join(t for t, _ in tokens)}\n"
+        )
     else:
         tokens = _collect_compound_tokens()
         if not tokens:
@@ -684,13 +796,23 @@ def main() -> None:
     mode.add_argument(
         "--test",
         action="store_true",
-        help="Crawl, then one sample per route (shortest paper/proposal/compound; random DAO)",
+        help=(
+            f"Crawl, then up to {TEST_MODE_REVIEW_LIMIT} reviews across routes "
+            "(articles → DAOs → proposals → compounds; smallest/shortest first)"
+        ),
+    )
+    parser.add_argument(
+        "--test-limit",
+        type=int,
+        default=TEST_MODE_REVIEW_LIMIT,
+        metavar="N",
+        help=f"Max reviews in --test mode (default: {TEST_MODE_REVIEW_LIMIT})",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=None,
-        help="RNG seed for --test DAO sample selection",
+        help="RNG seed for --test DAO sample order",
     )
     parser.add_argument(
         "--dry-run",
@@ -736,14 +858,19 @@ def main() -> None:
 
     test_mode = args.test
     if test_mode:
-        _banner("Mode: TEST (one sample per route)")
+        _reset_test_budget(args.test_limit)
+        _banner(f"Mode: TEST (up to {args.test_limit} reviews across routes)")
     else:
         _banner("Mode: ALL (every item in crawlers/output)")
 
     failures = 0
+    _reset_crawl_log_checkpoint_state()
 
     if not args.skip_crawl:
         run_crawl(dry_run=args.dry_run)
+
+    if not args.dry_run and not args.skip_upload:
+        _sync_crawl_log_for_reviews()
 
     failures += run_article_reviews(
         dry_run=args.dry_run,
@@ -775,6 +902,8 @@ def main() -> None:
         dry_run=args.dry_run,
         skip_snapshot=args.skip_snapshot,
     )
+
+    failures += _crawl_log_checkpoint_failures
 
     _banner("Orchestrator finished")
     if failures:

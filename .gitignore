@@ -10,6 +10,24 @@ compounds/BioAssay-NLG/
 # Arweave wallet keyfiles (any path)
 arweave-keyfile-*.json
 
+# age private keys (encrypt.ps1)
+*.age-key.txt
+
+# age-encrypted keyfiles
+arweave-keyfile-*.json.age
+
+# Local encrypt/decrypt helpers (decrypt-secrets.sh stays tracked)
+decrypt.ps1
+decrypt.sh
+encrypt.ps1
+encrypt.sh
+
+# Docker aux (Dockerfile and entrypoint.sh stay tracked)
+.dockerignore
+
+# Local monitoring schema
+monitor/
+
 # Dependencies
 node_modules/
 

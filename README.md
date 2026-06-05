@@ -2,7 +2,7 @@
 
 Multi-route research review factory for DeScAI. Agent Core crawls source data (ResearchHub, Molecule IPNFTs, Pump Science compounds), runs LLM pipelines to produce scored reviews with evidence audits, optionally publishes bundles to Arweave, and snapshots crawl + review artifacts to private Cloudflare R2.
 
-The top-level driver is [`orchestrate.py`](orchestrate.py): crawl → review every item → upload each bundle → snapshot.
+The top-level driver is [`orchestrate.py`](orchestrate.py): crawl → review every item → upload each bundle (auto-marks `reviewed` in crawl-log) → upload crawl-log every 5 reviews → snapshot.
 
 ## Architecture
 
@@ -34,7 +34,7 @@ flowchart LR
 - **Python 3.10+**
 - **Node.js** (crawlers and Arweave uploader)
 - **Local vLLM** or other OpenAI-compatible endpoints — see [`env-example.txt`](env-example.txt)
-- **Optional:** Arweave wallet (`AGENT_WALLET`, `PATH_TO_KEYFILE`) for on-chain upload; Cloudflare R2 credentials for snapshots
+- **Optional:** Arweave wallet (`AGENT_WALLET`, `PATH_TO_KEYFILE`) for on-chain upload; Cloudflare R2 credentials for snapshots; Cloudflare D1 credentials for container status relay
 
 ## Setup
 
@@ -56,7 +56,7 @@ cd ../crawlers/molecule/crawler && npm install   # if running Molecule crawl
 | Command | Behavior |
 |---------|----------|
 | `python orchestrate.py` | Full run: crawl → all reviews → upload each → R2 snapshot |
-| `python orchestrate.py --test` | One sample per route (smoke test) |
+| `python orchestrate.py --test` | Up to 10 reviews across routes (smoke test; `--test-limit N`) |
 | `python orchestrate.py --dry-run` | Print commands only |
 | `python orchestrate.py --skip-crawl` | Use existing `crawlers/output/` |
 | `python orchestrate.py --skip-upload` | Pipelines only |
@@ -126,6 +126,8 @@ python compounds/orchestrate.py --compounds Omipalisib Ginsenoside_Rh2 Urolithin
 | [`uploader/`](uploader/) | Arweave upload recipes |
 | [`snapshotter/`](snapshotter/) | Compress + upload backup to R2 |
 | [`orchestrate.py`](orchestrate.py) | Top-level agent driver |
+| [`status_relay.py`](status_relay.py) | Container-side orchestrator status monitor (writes to D1) |
+| [`monitor/schema.sql`](monitor/schema.sql) | D1 tables for orchestrator run status |
 
 **Gitignored local data:** `reviews/`, `crawlers/output/*`, `old/`, `snapshot.tar.zst`, `snapshot-receipt.json`.
 
@@ -152,8 +154,10 @@ Copy [`env-example.txt`](env-example.txt) to `.env` at the repo root. Shared LLM
 | Tagger LLM | `TAGGER_BASE_URL`, `TAGGER_API_KEY`, `TAGGER_MODEL` | Claim/proposal tagging |
 | Vision / OCR | `VISION_MODEL_URL`, `VISION_MODEL_API_KEY`, `READ_PAPER_MODEL` | PDF read, DAO multimedia |
 | Literature | `OPENALEX_EMAIL` | Originality / scientific grounding |
+| Hugging Face Hub | `HF_TOKEN` | `hf` CLI, `transformers`, Docling `BAAI/bge-m3` downloads |
 | Arweave | `AGENT_WALLET`, `PATH_TO_KEYFILE` | [`uploader/`](uploader/README.md) |
 | R2 snapshot | `SNAPSHOT_R2_ENDPOINT`, `SNAPSHOT_R2_BUCKET`, `SNAPSHOT_R2_ACCESS_KEY_ID`, `SNAPSHOT_R2_SECRET_ACCESS_KEY` | [`snapshotter/`](snapshotter/README.md) |
+| D1 status relay | `D1_DATABASE_ID`, `D1_ACCOUNT_ID`, `D1_TOKEN` | Docker entrypoint → [`status_relay.py`](status_relay.py) |
 
 Optional overrides: `VALIDATOR_MODEL`, `CLASSIFIER_MODEL`, `LLM_ENABLE_THINKING`. Deprecated aliases `VLLM_*` still work when `LLM_*` is unset.
 
@@ -169,7 +173,7 @@ python -m uploader --recipe compounds --dir reviews/compounds/<TICKER>/review [-
 python -m uploader --recipe crawl-log --file crawlers/output/crawl-log.json
 ```
 
-See [`uploader/README.md`](uploader/README.md) for recipe details and resume behavior.
+Review uploads auto-mark `reviewed` in `crawlers/output/crawl-log.json` (v2). See [`uploader/README.md`](uploader/README.md) for recipe details and resume behavior.
 
 **R2 backup:**
 
@@ -180,6 +184,31 @@ python -m snapshotter --no-upload    # build archive locally
 ```
 
 See [`snapshotter/README.md`](snapshotter/README.md) for R2 setup and flags.
+
+## Container status relay
+
+When the image starts via [`entrypoint.sh`](entrypoint.sh), a background [`status_relay.py`](status_relay.py) process tails `logs/orchestrate.log` and writes orchestrator phase to the Cloudflare D1 database **`agent-status`**. It does not modify or signal the orchestrator.
+
+| Status | Meaning |
+|--------|---------|
+| `crawling` | Step 1 (full crawl) in progress |
+| `reviewing` | Review routes or snapshot step in progress |
+| `done` | `orchestrate.py` exited 0 |
+| `crashed` | `orchestrate.py` exited non-zero |
+
+**D1 setup (once):** apply [`monitor/schema.sql`](monitor/schema.sql) to `agent-status` (dashboard or `wrangler d1 execute agent-status --remote`).
+
+**Env vars** (in `.env` / `.env.age`):
+
+| Variable | Purpose |
+|----------|---------|
+| `D1_DATABASE_ID` | D1 database UUID for `agent-status` |
+| `D1_ACCOUNT_ID` | Cloudflare account ID |
+| `D1_TOKEN` | API token with **D1 Edit** on that database |
+
+Optional: `ORCHESTRATOR_RUN_ID` (default `{hostname}-{unix_ts}`), `STATUS_RELAY_ENABLED=0` to disable.
+
+D1 writes are **best-effort** — if the API is unreachable, the relay logs a warning and the orchestrator keeps running. Include the D1 vars in encrypted `.env.age` for container runs.
 
 ## Further reading
 

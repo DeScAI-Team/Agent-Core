@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from uploader.crawl_log import DEFAULT_CRAWL_LOG_PATH, apply_reviewed_mark
 from uploader.recipes import Recipe, UploadStep, get_recipe
 
 UPLOADER_DIR = Path(__file__).resolve().parent
@@ -233,6 +234,7 @@ def run_sequential_upload(
     output_dir: Path,
     *,
     resume: bool = False,
+    crawl_log_path: Path | None = None,
 ) -> dict[str, Any]:
     input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
@@ -350,7 +352,17 @@ def run_sequential_upload(
     print(f"  Upload Sequence Complete!")
     print(f"{'=' * 60}")
 
-    return {"success": True, "metadata": metadata}
+    crawl_log_marked = apply_reviewed_mark(
+        recipe,
+        input_dir,
+        tag_ctx,
+        crawl_log_path=crawl_log_path or DEFAULT_CRAWL_LOG_PATH,
+    )
+    return {
+        "success": True,
+        "metadata": metadata,
+        "crawl_log_marked": crawl_log_marked,
+    }
 
 
 def run_crawl_log_upload(
@@ -378,15 +390,17 @@ def run_crawl_log_upload(
             crawl_date = datetime.now(timezone.utc).isoformat()
 
     metadata_path = output_dir / METADATA_FILENAME
-    if resume and metadata_path.is_file():
+    prior_metadata: dict[str, Any] = {}
+    if metadata_path.is_file():
         try:
             with open(metadata_path, encoding="utf-8") as f:
-                existing = json.load(f)
-            if existing.get("crawl_log", {}).get("txid"):
-                print("\n  Resuming: crawl-log already uploaded")
-                return {"success": True, "metadata": existing}
+                prior_metadata = json.load(f)
         except Exception as e:
             print(f"\n  Warning: Could not load existing metadata: {e}")
+
+    if resume and prior_metadata.get("crawl_log", {}).get("txid"):
+        print("\n  Resuming: crawl-log already uploaded")
+        return {"success": True, "metadata": prior_metadata}
 
     tags = [
         {"name": "doctype", "value": "crawllog"},
@@ -411,7 +425,16 @@ def run_crawl_log_upload(
         save_metadata(output_dir, metadata)
         return {"success": False, "error": err, "metadata": metadata}
 
+    checkpoint_entry = {
+        "txid": result["txId"],
+        "url": result["webUrl"],
+        "tags": tags,
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    checkpoints = list(prior_metadata.get("crawl_log_checkpoints", []))
+    checkpoints.append(checkpoint_entry)
     metadata = {
+        **{k: v for k, v in prior_metadata.items() if k not in ("crawl_log", "crawl_log_checkpoints")},
         "upload_date": datetime.now(timezone.utc).isoformat(),
         "uploaded_file": str(file_path),
         "crawl_log": {
@@ -419,6 +442,7 @@ def run_crawl_log_upload(
             "url": result["webUrl"],
             "tags": tags,
         },
+        "crawl_log_checkpoints": checkpoints,
     }
     save_metadata(output_dir, metadata)
     print(f"\n  Upload successful!")

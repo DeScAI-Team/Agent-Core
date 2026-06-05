@@ -5,8 +5,9 @@
  * From crawlers/:  node full-crawl.mjs
  *
  * Crawl-log (Arweave): set AGENT_WALLET and PATH_TO_KEYFILE in repo-root .env. Before crawls,
- * the latest on-chain JSON with tag doctype=crawllog is loaded so known molecule folders,
- * researchhub files, and pump.science tickers are skipped. After crawls, merged crawl-log.json
+ * the latest on-chain JSON with tag doctype=crawllog is loaded; only entries marked reviewed
+ * are skipped (unreviewed items are re-crawled after ephemeral restarts). After crawls, merged
+ * crawl-log.json (v2 objects with optional reviewed field)
  * (researchhub, molecule, pump.science tickers) is uploaded via
  * python -m uploader --recipe crawl-log (tags: doctype, Crawl-Date, Content-Type); receipt at
  * crawlers/output/crawl-upload-receipt.json.
@@ -146,13 +147,105 @@ async function fetchLatestCrawlLog(agentWallet) {
   if (!Array.isArray(log.researchhub?.files) || !Array.isArray(log.molecule?.folders)) {
     return { log: null, txId: null };
   }
-  return { log, txId: bestId };
+  return { log: normalizeCrawlLog(log), txId: bestId };
+}
+
+const REVIEWED_VALUE = "reviewed";
+
+/** @param {unknown} entry */
+function entryKey(section, entry) {
+  if (typeof entry === "string") return entry.trim() || null;
+  if (!entry || typeof entry !== "object") return null;
+  if (section === "researchhub") {
+    return String(/** @type {{ path?: string }} */ (entry).path ?? "").trim() || null;
+  }
+  if (section === "molecule") {
+    return String(/** @type {{ name?: string }} */ (entry).name ?? "").trim() || null;
+  }
+  if (section === "pumpScience") {
+    return String(/** @type {{ ticker?: string }} */ (entry).ticker ?? "").trim() || null;
+  }
+  return null;
+}
+
+/** @param {unknown} entry */
+function isReviewedEntry(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  return /** @type {{ reviewed?: string }} */ (entry).reviewed === REVIEWED_VALUE;
+}
+
+/** @param {string} section @param {string} key @param {boolean} reviewed */
+function makeEntry(section, key, reviewed = false) {
+  /** @type {Record<string, string>} */
+  const entry =
+    section === "researchhub"
+      ? { path: key }
+      : section === "molecule"
+        ? { name: key }
+        : { ticker: key };
+  if (reviewed) entry.reviewed = REVIEWED_VALUE;
+  return entry;
+}
+
+/** @param {string} section @param {unknown[]} entries */
+function normalizeEntries(section, entries) {
+  /** @type {Map<string, Record<string, string>>} */
+  const byKey = new Map();
+  for (const raw of entries) {
+    const key = entryKey(section, raw);
+    if (!key) continue;
+    const reviewed = isReviewedEntry(raw);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, makeEntry(section, key, reviewed));
+    } else if (reviewed) {
+      existing.reviewed = REVIEWED_VALUE;
+    }
+  }
+  return [...byKey.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, v]) => v);
+}
+
+/** @param {Record<string, unknown>} log */
+function normalizeCrawlLog(log) {
+  const out = { ...log, version: 2 };
+  if (Array.isArray(log.researchhub?.files)) {
+    out.researchhub = {
+      .../** @type {object} */ (log.researchhub),
+      files: normalizeEntries("researchhub", log.researchhub.files),
+    };
+  }
+  if (Array.isArray(log.molecule?.folders)) {
+    out.molecule = {
+      .../** @type {object} */ (log.molecule),
+      folders: normalizeEntries("molecule", log.molecule.folders),
+    };
+  }
+  if (Array.isArray(log.pumpScience?.tickers)) {
+    out.pumpScience = {
+      .../** @type {object} */ (log.pumpScience),
+      tickers: normalizeEntries("pumpScience", log.pumpScience.tickers),
+    };
+  }
+  return out;
+}
+
+/** @param {string} section @param {unknown[]} entries */
+function reviewedKeys(section, entries) {
+  return normalizeEntries(section, entries)
+    .filter((e) => e.reviewed === REVIEWED_VALUE)
+    .map((e) => entryKey(section, e))
+    .filter(Boolean);
 }
 
 async function writeCrawlSkipFile(absPath, log) {
-  const moleculeFolders = log?.molecule?.folders ?? [];
-  const researchhubFiles = log?.researchhub?.files ?? [];
-  const pumpScienceTickers = log?.pumpScience?.tickers ?? [];
+  const moleculeFolders = reviewedKeys("molecule", log?.molecule?.folders ?? []);
+  const researchhubFiles = reviewedKeys("researchhub", log?.researchhub?.files ?? []);
+  const pumpScienceTickers = reviewedKeys(
+    "pumpScience",
+    log?.pumpScience?.tickers ?? [],
+  );
   await fs.mkdir(path.dirname(absPath), { recursive: true });
   await fs.writeFile(
     absPath,
@@ -255,14 +348,50 @@ function mergeCrawlLog(
   diskTickers,
   previousTxId,
 ) {
-  const prevFiles = previousLog?.researchhub?.files ?? [];
-  const prevFolders = previousLog?.molecule?.folders ?? [];
-  const prevTickers = previousLog?.pumpScience?.tickers ?? [];
-  const files = [...new Set([...prevFiles, ...diskFiles])].sort();
-  const folders = [...new Set([...prevFolders, ...diskFolders])].sort();
-  const tickers = [...new Set([...prevTickers, ...diskTickers])].sort();
+  const prev = previousLog ? normalizeCrawlLog(previousLog) : null;
+  const prevFileMap = new Map(
+    normalizeEntries("researchhub", prev?.researchhub?.files ?? []).map((e) => [
+      entryKey("researchhub", e),
+      e,
+    ]),
+  );
+  const prevFolderMap = new Map(
+    normalizeEntries("molecule", prev?.molecule?.folders ?? []).map((e) => [
+      entryKey("molecule", e),
+      e,
+    ]),
+  );
+  const prevTickerMap = new Map(
+    normalizeEntries("pumpScience", prev?.pumpScience?.tickers ?? []).map((e) => [
+      entryKey("pumpScience", e),
+      e,
+    ]),
+  );
+
+  for (const path of diskFiles) {
+    if (!prevFileMap.has(path)) prevFileMap.set(path, makeEntry("researchhub", path));
+  }
+  for (const name of diskFolders) {
+    if (!prevFolderMap.has(name)) prevFolderMap.set(name, makeEntry("molecule", name));
+  }
+  for (const ticker of diskTickers) {
+    if (!prevTickerMap.has(ticker)) {
+      prevTickerMap.set(ticker, makeEntry("pumpScience", ticker));
+    }
+  }
+
+  const files = [...prevFileMap.values()].sort((a, b) =>
+    (entryKey("researchhub", a) ?? "").localeCompare(entryKey("researchhub", b) ?? ""),
+  );
+  const folders = [...prevFolderMap.values()].sort((a, b) =>
+    (entryKey("molecule", a) ?? "").localeCompare(entryKey("molecule", b) ?? ""),
+  );
+  const tickers = [...prevTickerMap.values()].sort((a, b) =>
+    (entryKey("pumpScience", a) ?? "").localeCompare(entryKey("pumpScience", b) ?? ""),
+  );
+
   return {
-    version: 1,
+    version: 2,
     updatedAt: new Date().toISOString(),
     previousArweaveTxId: previousTxId ?? null,
     researchhub: { files },

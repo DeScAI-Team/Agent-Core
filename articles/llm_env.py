@@ -19,6 +19,14 @@ _REPO_ROOT = _ARTICLES_DIR.parent
 if load_dotenv is not None:
     load_dotenv(_REPO_ROOT / ".env")
 
+# Hugging Face Hub: HF_TOKEN is canonical; keep legacy alias in sync for older libraries.
+_hf_token = os.environ.get("HF_TOKEN", "").strip()
+_legacy_hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN", "").strip()
+if _hf_token and not _legacy_hf_token:
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = _hf_token
+elif _legacy_hf_token and not _hf_token:
+    os.environ["HF_TOKEN"] = _legacy_hf_token
+
 LLM_BASE_URL = (
     os.environ.get("LLM_BASE_URL")
     or os.environ.get("VLLM_BASE_URL")

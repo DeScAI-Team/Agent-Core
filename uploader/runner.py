@@ -17,6 +17,7 @@ def run_recipe(
     file: Path | str | None = None,
     crawl_date: str | None = None,
     resume: bool = False,
+    crawl_log_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """
     Run an upload recipe.
@@ -44,4 +45,11 @@ def run_recipe(
     input_dir = Path(dir)
     out_dir = Path(output_dir) if output_dir is not None else input_dir
     recipe = get_recipe(name)
-    return run_sequential_upload(recipe, input_dir, out_dir, resume=resume)
+    log_path = Path(crawl_log_path) if crawl_log_path is not None else None
+    return run_sequential_upload(
+        recipe,
+        input_dir,
+        out_dir,
+        resume=resume,
+        crawl_log_path=log_path,
+    )

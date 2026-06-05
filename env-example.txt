@@ -4,11 +4,28 @@ VISION_MODEL_URL=http://127.0.0.1:8001/v1
 VISION_MODEL_API_KEY=none
 TAGGER_BASE_URL=http://127.0.0.1:8002/v1
 TAGGER_API_KEY=none
+WHISPER_CPP_BIN=
+WHISPER_MODEL_PATH=
 AGENT_WALLET=
 PATH_TO_KEYFILE=
 MOLECULE_API_KEY=
+
+HF_TOKEN=
+
+# Cloudflare D1 status relay (container entrypoint → status_relay.py)
+D1_DATABASE_ID=
+D1_ACCOUNT_ID=
+D1_TOKEN=
+# ORCHESTRATOR_RUN_ID=          # optional; default {hostname}-{unix_ts}
+# STATUS_RELAY_ENABLED=1        # set 0 to disable D1 status writes
 
 SNAPSHOT_R2_ENDPOINT=
 SNAPSHOT_R2_BUCKET=
 SNAPSHOT_R2_ACCESS_KEY_ID=
 SNAPSHOT_R2_SECRET_ACCESS_KEY=
+
+# Container startup (./decrypt-secrets.sh) — pass at runtime, never commit:
+# AGE_SECRET_KEY_ENV=          # age identity for .env.age
+# AGE_SECRET_KEY_ARWEAVE=      # age identity for arweave-keyfile-....json.age
+# Or: AGE_SECRET_KEY_ENV_B64 / AGE_SECRET_KEY_ARWEAVE_B64
+# Or: AGE_SECRET_KEY_ENV_FILE / AGE_SECRET_KEY_ARWEAVE_FILE (mounted secret paths)

@@ -47,7 +47,7 @@ Paths in `WALLET_PATH` are resolved from `Arweave-Cli/` when relative.
 
 ## Unified uploader (`python -m uploader`)
 
-The preferred **recipe-based** CLI for new work and for crawl logs. Orchestrates sequential uploads, appends cross-links into temp JSON copies (never mutates sources on disk), and writes [`upload_metadata.json`](articles/article_uploader/upload_metadata.schema.json) to an output directory.
+The preferred **recipe-based** CLI for new work and for crawl logs. Orchestrates sequential uploads, appends cross-links into temp JSON copies (never mutates sources on disk), and writes [`upload_metadata.json`](articles/article_uploader/upload_metadata.schema.json) to an output directory. Review recipes auto-mark matching entries as `reviewed` in `crawlers/output/crawl-log.json` (v2) on successful upload; [`orchestrate.py`](../orchestrate.py) uploads that file every 5 review uploads.
 
 Full module docs: [`uploader/README.md`](uploader/README.md).
 
@@ -60,7 +60,7 @@ python -m uploader --recipe article --dir articles/data/<study>/output [--resume
 python -m uploader --recipe proposal --dir proposals/data/<id> [--resume]
 python -m uploader --recipe dao --dir DAOs/molecule/output/<DAO>/synthesis [--resume]
 python -m uploader --recipe compounds --dir path/to/compound/output [--resume]
-python -m uploader --recipe crawl-log --file crawlers/output/crawl-log.json [--output-dir crawlers/output] [--resume]
+python -m uploader --recipe crawl-log --file crawlers/output/crawl-log.json [--output-dir crawlers/output]
 ```
 
 | Flag | Purpose |
@@ -70,7 +70,8 @@ python -m uploader --recipe crawl-log --file crawlers/output/crawl-log.json [--o
 | `--output-dir` | Where to write `upload_metadata.json` (defaults to `--dir` or crawl file parent) |
 | `--file` | Input file (`crawl-log` only) |
 | `--crawl-date` | Override `Crawl-Date` tag for crawl-log |
-| `--resume` | Skip steps already present in existing metadata |
+| `--resume` | Skip steps already present in existing metadata (review recipes only; do not use for crawl-log checkpoints) |
+| `--crawl-log-file` | Override crawl-log path for auto-marking after review uploads |
 
 ### Recipes (steps and tags)
 
@@ -102,6 +103,8 @@ python -m uploader --recipe crawl-log --file crawlers/output/crawl-log.json --ou
 ```
 
 Unless `--no-upload` is passed. It also writes [`crawlers/output/crawl-upload-receipt.json`](crawlers/output/crawl-upload-receipt.json) (CLI exit code and stderr). **Success** is reflected in `crawlers/output/upload_metadata.json` (`crawl_log.txid`); the receipt may be stale if a later retry succeeded.
+
+Crawl-log v2 uses object entries with optional `reviewed: "reviewed"`. Crawlers skip only reviewed items; [`orchestrate.py`](../orchestrate.py) triggers additional crawl-log uploads every 5 successful review bundle uploads.
 
 ---
 

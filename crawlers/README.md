@@ -27,7 +27,7 @@ npm run cli -- crawl --output-dir @crawlers/output/molecule/ipnfts --index --con
 
 ## Incremental skip
 
-When `AGENT_WALLET` is set, the crawl orchestrator loads the latest on-chain crawl-log and writes `crawlers/output/.crawl-skip.json`. Pass it to ResearchHub or Molecule crawlers to skip already-ingested items:
+When `AGENT_WALLET` is set, the crawl orchestrator loads the latest on-chain crawl-log (v2) and writes `crawlers/output/.crawl-skip.json` containing **only entries marked `reviewed`**. Unreviewed crawl-log entries are re-crawled on the next run (recovering work after ephemeral container restarts). Pass the skip file to ResearchHub or Molecule crawlers:
 
 ```bash
 --crawl-skip-file crawlers/output/.crawl-skip.json
